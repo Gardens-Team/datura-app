@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="100" cy="100" r="80" fill="#5865F2" opacity="0.1"/>
+  <path d="M70 80H130C134.418 80 138 83.5817 138 88V122C138 126.418 134.418 130 130 130H70C65.5817 130 62 126.418 62 122V88C62 83.5817 65.5817 80 70 80Z" stroke="#5865F2" stroke-width="4"/>
+  <path d="M62 90L95.7128 110.356C98.3827 111.991 101.617 111.991 104.287 110.356L138 90" stroke="#5865F2" stroke-width="4"/>
+</svg> 

@@ -1,0 +1,33 @@
+{
+  "cli": {
+    "version": ">= 16.1.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleDebug",
+        "prebuildCommand": "yarn prebuild:libsodium"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk",
+        "prebuildCommand": "yarn prebuild:libsodium"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "android": {
+        "prebuildCommand": "yarn prebuild:libsodium"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
