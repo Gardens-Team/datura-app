@@ -26,6 +26,8 @@ import { GardenAuthProvider } from '@/components/GardenAuthProvider';
 import QRCode from 'react-native-qrcode-svg';
 import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
+import * as Sharing from 'expo-sharing';
+import ViewShot from 'react-native-view-shot';
 
 export default function GardenScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -37,12 +39,14 @@ export default function GardenScreen() {
   const [qrModalVisible, setQRModalVisible] = useState(false);
   const [notificationEnabled, setNotificationEnabled] = useState(true);
   const [isCreatorOrAdmin, setIsCreatorOrAdmin] = useState(false);
+  const [qrImageUri, setQrImageUri] = useState<string | null>(null);
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
   const insets = useSafeAreaInsets();
   const { user } = useCurrentUser();
   const navigation = useNavigation();
   const menuRef = useRef(null);
+  const qrCodeRef = useRef<ViewShot>(null);
   
   // Set the title in the header
   useEffect(() => {
@@ -143,6 +147,70 @@ export default function GardenScreen() {
         scrollEnabled={false}
         ItemSeparatorComponent={() => <View style={{ height: 2 }} />}
       />
+    </View>
+  );
+
+  // Function to capture QR code as image
+  const captureQRCode = async () => {
+    if (qrCodeRef.current && typeof qrCodeRef.current.capture === 'function') {
+      try {
+        const uri = await qrCodeRef.current.capture();
+        setQrImageUri(uri);
+        return uri;
+      } catch (error) {
+        console.error('Error capturing QR code:', error);
+        return null;
+      }
+    }
+    return null;
+  };
+
+  // Function to share QR code
+  const shareQRCode = async () => {
+    const uri = qrImageUri || await captureQRCode();
+    if (uri) {
+      try {
+        await Sharing.shareAsync(`file://${uri}`);
+      } catch (error) {
+        console.error('Error sharing QR code:', error);
+      }
+    }
+  };
+
+  // Branded QR Card Component
+  const BrandedQRCard = () => (
+    <View style={[styles.qrCard, { backgroundColor: colorScheme === 'dark' ? '#222' : 'white' }]}>
+      <View style={styles.qrCardHeader}>
+        <Text style={[styles.qrCardTitle, { color: colors.text }]}>Garden Invitation</Text>
+      </View>
+      
+      <View style={styles.qrCodeContainer}>
+        <QRCode 
+          value={Linking.createURL(`/join/${id}` as string)} 
+          size={200} 
+          logo={garden?.logo}
+          logoSize={50}
+          logoBackgroundColor="white"
+        />
+      </View>
+      
+      <View style={styles.qrLogosRow}>
+        <Image 
+          source={{ uri: user?.profile_pic || 'https://via.placeholder.com/40' }} 
+          style={styles.qrUserAvatar} 
+        />
+        <View style={styles.qrArrow}>
+          <Ionicons name="arrow-forward" size={20} color={colors.primary} />
+        </View>
+        <Image 
+          source={{ uri: garden?.logo || 'https://via.placeholder.com/40' }} 
+          style={styles.qrGardenLogo} 
+        />
+      </View>
+      
+      <Text style={[styles.qrInviteText, { color: colors.secondaryText }]}>
+        Join {user?.username || 'User'} in {garden?.name || 'Garden'}
+      </Text>
     </View>
   );
 
@@ -303,16 +371,37 @@ export default function GardenScreen() {
         {qrModalVisible && (
           <Modal visible transparent animationType="fade">
             <View style={styles.backdrop}>
-              <View style={[styles.menuDropdown, { width: 260, alignItems: 'center' }]}>  
-                <QRCode value={Linking.createURL(`/join/${id}` as string)} size={200} />
-                <TouchableOpacity onPress={() => {
-                  const url = Linking.createURL(`/join/${id}`);
-                  Clipboard.setString(url);
-                }} style={styles.menuItem}>
-                  <Text style={[styles.menuItemText, { color: colors.text }]}>Copy Link</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setQRModalVisible(false)} style={styles.menuItem}>
-                  <Text style={[styles.menuItemText, { color: colors.text }]}>Close</Text>
+              <View style={[styles.qrModalContainer, { backgroundColor: colorScheme === 'dark' ? '#333' : '#fff' }]}>
+                <ViewShot ref={qrCodeRef} options={{ format: 'jpg', quality: 0.9 }}>
+                  <BrandedQRCard />
+                </ViewShot>
+                
+                <View style={styles.qrModalButtons}>
+                  <TouchableOpacity 
+                    onPress={() => {
+                      const url = Linking.createURL(`/join/${id}`);
+                      Clipboard.setString(url);
+                    }} 
+                    style={[styles.qrButton, { backgroundColor: colors.border }]}
+                  >
+                    <Ionicons name="copy-outline" size={20} color={colors.text} />
+                    <Text style={[styles.qrButtonText, { color: colors.text }]}>Copy Link</Text>
+                  </TouchableOpacity>
+                  
+                  <TouchableOpacity 
+                    onPress={shareQRCode} 
+                    style={[styles.qrButton, { backgroundColor: colors.primary }]}
+                  >
+                    <Ionicons name="share-outline" size={20} color="white" />
+                    <Text style={[styles.qrButtonText, { color: 'white' }]}>Share QR</Text>
+                  </TouchableOpacity>
+                </View>
+                
+                <TouchableOpacity 
+                  onPress={() => setQRModalVisible(false)} 
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close-circle" size={36} color={colors.secondaryText} />
                 </TouchableOpacity>
               </View>
             </View>
@@ -476,5 +565,85 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     zIndex: 5,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  qrModalContainer: {
+    width: 320,
+    borderRadius: 16,
+    alignItems: 'center',
+    padding: 16,
+    overflow: 'hidden',
+  },
+  qrCard: {
+    width: '100%',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+  },
+  qrCardHeader: {
+    marginBottom: 16,
+  },
+  qrCardTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  qrCodeContainer: {
+    padding: 16,
+    backgroundColor: 'white',
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  qrLogosRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  qrUserAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: 'white',
+  },
+  qrGardenLogo: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: 'white',
+  },
+  qrArrow: {
+    marginHorizontal: 10,
+  },
+  qrInviteText: {
+    textAlign: 'center',
+    fontSize: 14,
+  },
+  qrModalButtons: {
+    flexDirection: 'row',
+    marginTop: 16,
+    width: '100%',
+    justifyContent: 'space-between',
+  },
+  qrButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+    borderRadius: 8,
+    flex: 1,
+    marginHorizontal: 4,
+  },
+  qrButtonText: {
+    marginLeft: 8,
+    fontWeight: '500',
+  },
+  closeButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
   },
 });

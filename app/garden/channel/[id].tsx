@@ -14,7 +14,10 @@ import {
   Pressable,
   Alert,
   Linking,
-  TextStyle
+  TextStyle,
+  Modal,
+  ScrollView,
+  Animated,
 } from 'react-native';
 import {
   GiftedChat,
@@ -27,7 +30,7 @@ import {
   Actions,
   IMessage,
 } from 'react-native-gifted-chat';
-import { Audio, AVPlaybackStatus } from 'expo-av';
+import { Audio, AVPlaybackStatus, ResizeMode, Video } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { useLocalSearchParams, router, useNavigation } from 'expo-router';
@@ -43,10 +46,12 @@ import {
   ExtendedMessage,
   useMessageService,
   subscribeToChannel,
+  getGroupKeyForChannel,
 } from '@/services/message-service';
 import { Channel, Garden } from '@/services/garden-service';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useEffect as useDebugEffect } from 'react';
+import * as Sharing from 'expo-sharing';
 
 // Custom interface for the recording state
 interface RecordingState {
@@ -54,6 +59,45 @@ interface RecordingState {
   isDoneRecording: boolean;
   recordingDuration: number;
   recordingUri: string | null;
+}
+
+// Fix the Channel type first by extending it to include description
+interface ChannelWithDescription extends Channel {
+  description?: string;
+}
+
+// Add interface for user data structure
+interface ChannelUser {
+  id: string;
+  username: string;
+  avatar: string;
+  status: 'online' | 'idle' | 'offline';
+  role?: string;
+}
+
+// Fix the garden member structure to match what Supabase returns
+interface SupabaseUserData {
+  id: string;
+  username: string;
+  profile_pic: string;
+}
+
+// Add interface for membership data that matches the selected fields
+interface Membership {
+  user_id: string;
+  role: string;
+  channels: string[] | null;
+}
+
+// Add interface for the garden member with nested user
+interface GardenMember {
+  id: string;
+  user_id: string;
+  users: {
+    id: string;
+    username: string;
+    profile_pic: string;
+  } | null;
 }
 
 // Custom MessageAudio component since it's not exported from gifted-chat
@@ -184,8 +228,19 @@ export default function ChannelScreen() {
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
-  const [channel, setChannel] = useState<Channel | null>(null);
+  const [channel, setChannel] = useState<ChannelWithDescription | null>(null);
   const [garden, setGarden] = useState<Garden | null>(null);
+  const [debugInfo, setDebugInfo] = useState<string>('Loading...');
+  
+  // New state variables for drawer and info popup
+  const [drawerVisible, setDrawerVisible] = useState(false);
+  const [infoVisible, setInfoVisible] = useState(false);
+  const drawerAnimation = useRef(new Animated.Value(300)).current;
+  const [channelUsers, setChannelUsers] = useState<ChannelUser[]>([]);
+  
+  // New ref for info popover positioning
+  const infoButtonRef = useRef<View>(null);
+  const [infoPosition, setInfoPosition] = useState({ top: 0, right: 0 });
   
   // Recording state management
   const [recording, setRecording] = useState<RecordingState>({
@@ -198,6 +253,8 @@ export default function ChannelScreen() {
   // Refs
   const recordingInstance = useRef<Audio.Recording | null>(null);
   const recordingTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   // Fetch channel and garden info
   useEffect(() => {
@@ -239,16 +296,97 @@ export default function ChannelScreen() {
     fetchChannelInfo();
   }, [id, navigation]);
 
+  // Fetch users in this channel
+  useEffect(() => {
+    async function fetchChannelUsers() {
+      if (!channel) return;
+      
+      try {
+        // First, get all garden memberships
+        const { data: memberships, error: membershipError } = await supabase
+          .from('memberships')
+          .select('user_id, role, channels')
+          .eq('garden_id', channel.garden_id);
+          
+        if (membershipError) {
+          throw membershipError;
+        }
+        
+        if (!memberships || memberships.length === 0) {
+          return;
+        }
+        
+        // Filter memberships to those who have access to this channel
+        const channelMembers = memberships.filter((member) => {
+          // Check if the channels array includes this channel ID
+          // If channels field is null/undefined, use empty array
+          const channels = member.channels || [];
+          return channels.includes(id) || channels.length === 0; // Include if explicitly added or if no channels specified (all access)
+        });
+        
+        if (channelMembers.length === 0) {
+          return;
+        }
+        
+        // Get user IDs that have access to this channel
+        const userIds = channelMembers.map(member => member.user_id);
+        
+        // Fetch user data for these users
+        const { data: userData, error: userError } = await supabase
+          .from('users')
+          .select('id, username, profile_pic')
+          .in('id', userIds);
+          
+        if (userError) {
+          throw userError;
+        }
+        
+        if (!userData) {
+          return;
+        }
+        
+        // Combine user data with roles
+        const statuses = ['online', 'idle', 'offline'] as const;
+        const formattedUsers = userData.map(user => {
+          // Find the matching membership to get role
+          const membership = channelMembers.find(member => member.user_id === user.id);
+          
+          return {
+            id: user.id,
+            username: user.username || 'Unknown',
+            avatar: user.profile_pic || '',
+            status: statuses[Math.floor(Math.random() * statuses.length)], // Random status for demo
+            role: membership?.role || 'member'
+          };
+        });
+        
+        setChannelUsers(formattedUsers);
+      } catch (error) {
+        console.error('Error fetching channel users:', error);
+      }
+    }
+    
+    fetchChannelUsers();
+  }, [channel, id]);
+
   // --- Initial load + live subscription ------------------------------
   useEffect(() => {
     let unsub: () => void;
     (async () => {
       setIsLoading(true);
       try {
-        const initialMsgs = await fetchMessages(id as string, undefined);
+        // First get the key for this channel
+        if (user) {
+          const key = await getGroupKeyForChannel(id as string, user.id);
+          setGroupKey(key || null);
+          setDebugInfo(key ? `KEY: ${key.substring(0, 5)}...` : 'NO KEY');
+        }
+        
+        const initialMsgs = await fetchMessages(id as string, groupKey || undefined);
         setMessages(initialMsgs);
       } catch (e) {
         console.error('Failed to load messages:', e);
+        setDebugInfo(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
         setIsLoading(false);
       }
@@ -257,7 +395,29 @@ export default function ChannelScreen() {
       });
     })();
     return () => unsub?.();
-  }, [id]);
+  }, [id, user]);
+
+  // Manual function to force key refresh if needed
+  const refreshKey = async () => {
+    if (!user || !id) return;
+    
+    try {
+      setDebugInfo('Refreshing key...');
+      setIsLoading(true);
+      const key = await getGroupKeyForChannel(id as string, user.id);
+      setGroupKey(key || null);
+      setDebugInfo(key ? `KEY: ${key.substring(0, 5)}...` : 'NO KEY');
+      
+      // Re-fetch messages with new key
+      const refreshedMsgs = await fetchMessages(id as string, key || undefined);
+      setMessages(refreshedMsgs);
+    } catch (e) {
+      console.error('Failed to refresh key:', e);
+      setDebugInfo(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // Request permissions for audio recording
   useEffect(() => {
@@ -384,6 +544,19 @@ export default function ChannelScreen() {
     
     try {
       setIsLoading(true);
+
+      // Add file size check
+      const fileInfo = await FileSystem.getInfoAsync(recording.recordingUri);
+      if (fileInfo.exists && fileInfo.size > 5 * 1024 * 1024) { // 5MB limit
+        Alert.alert(
+          "File too large", 
+          "Audio recording exceeds 5MB limit. Please record a shorter message.",
+          [{ text: "OK" }]
+        );
+        setIsLoading(false);
+        return;
+      }
+
       const audioUrl = await uploadAudioMessage(recording.recordingUri, id as string);
       
       // Create the message with audio content
@@ -414,7 +587,7 @@ export default function ChannelScreen() {
       });
     } catch (error) {
       console.error('Failed to send audio message', error);
-      Alert.alert('Error', 'Failed to send audio message');
+      Alert.alert('Error', 'Failed to send audio message. Please try again with a shorter recording.');
     } finally {
       setIsLoading(false);
     }
@@ -433,13 +606,25 @@ export default function ChannelScreen() {
     
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: "images",
         allowsEditing: true,
-        quality: 0.8,
+        quality: 0.6, // Lower quality for smaller file size
       });
       
       if (!result.canceled && result.assets[0].uri) {
         setIsLoading(true);
+        
+        // Add file size check
+        const fileInfo = await FileSystem.getInfoAsync(result.assets[0].uri);
+        if (fileInfo.exists && fileInfo.size > 5 * 1024 * 1024) { // 5MB limit
+          Alert.alert(
+            "File too large", 
+            "Image exceeds 5MB limit. Please select a smaller image or use the compression option.",
+            [{ text: "OK" }]
+          );
+          setIsLoading(false);
+          return;
+        }
         
         // Upload the image
         const imageUrl = await uploadImageMessage(result.assets[0].uri, id as string);
@@ -464,7 +649,7 @@ export default function ChannelScreen() {
       }
     } catch (error) {
       console.error('Failed to send image message', error);
-      Alert.alert('Error', 'Failed to send image');
+      Alert.alert('Error', 'Failed to send image. Please try a smaller or compressed image.');
     } finally {
       setIsLoading(false);
     }
@@ -688,9 +873,30 @@ export default function ChannelScreen() {
   
   // Custom render for messages with audio content
   const renderMessageAudio = (props: any) => {
+    if (!props.currentMessage.audio) return null;
+    
+    // Add logging to debug audio content
+    console.log('[Audio Renderer] Audio URL type:', typeof props.currentMessage.audio);
+    console.log('[Audio Renderer] Audio URL starts with:', props.currentMessage.audio.substring(0, 30) + '...');
+    
+    // For data URLs, we need to ensure they're properly formatted
+    let audioSource = props.currentMessage.audio;
+    if (audioSource && !audioSource.startsWith('http') && !audioSource.startsWith('data:audio')) {
+      // If it's base64 but missing the data:audio prefix, add it
+      if (audioSource.startsWith('/9j/') || audioSource.startsWith('UklGR')) {
+        audioSource = `data:audio/mp4;base64,${audioSource}`;
+      } else if (audioSource.includes('base64')) {
+        // It has base64 in it but might be missing proper formatting
+        if (!audioSource.startsWith('data:')) {
+          audioSource = `data:audio/mp4;${audioSource}`;
+        }
+      }
+      console.log('[Audio Renderer] Reformatted audio URL:', audioSource.substring(0, 30) + '...');
+    }
+    
     return (
       <MessageAudio
-        currentMessage={props.currentMessage}
+        currentMessage={{...props.currentMessage, audio: audioSource}}
         audioStyle={{
           container: {
             backgroundColor: 'transparent',
@@ -715,7 +921,211 @@ export default function ChannelScreen() {
     );
   };
 
-  // Render custom header
+  // Function to download/share media
+  async function handleDownload(uri: string, type: 'image' | 'video') {
+    try {
+      let base64Data = uri;
+      // If data URI, strip prefix
+      if (uri.startsWith('data:')) {
+        base64Data = uri.split(',')[1];
+      }
+      const ext = type === 'image' ? '.jpg' : '.mp4';
+      const filename = `media-${Date.now()}${ext}`;
+      const path = FileSystem.cacheDirectory + filename;
+      // Write base64 to file
+      await FileSystem.writeAsStringAsync(path, base64Data, { encoding: FileSystem.EncodingType.Base64 });
+      // Share it
+      await Sharing.shareAsync(path);
+    } catch (e) {
+      console.error('Download failed:', e);
+      Alert.alert('Error', 'Failed to download media.');
+    }
+  }
+
+  // Custom render for image messages
+  const renderMessageImage = (props: any) => {
+    try {
+      const imageSource = props.currentMessage.image;
+      if (!imageSource) return null;
+
+      return (
+        <View style={{ position: 'relative', marginVertical: 4 }}>
+          {/* Download button */}
+          <Pressable
+            style={{ position: 'absolute', top: 6, right: 6, zIndex: 2, padding: 4 }}
+            onPress={() => handleDownload(imageSource, 'image')}
+          >
+            <Ionicons name="download-outline" size={24} color="white" />
+          </Pressable>
+
+          {/* Image thumbnail with press to open */}
+          <Pressable onPress={() => setSelectedImage(imageSource)}>
+            <Image
+              source={{ uri: imageSource }}
+              style={{ width: 200, height: 150, borderRadius: 13 }}
+              resizeMode="cover"
+            />
+          </Pressable>
+        </View>
+      );
+    } catch (e) {
+      console.warn('Image render error:', e);
+      return null;
+    }
+  };
+
+  // Custom render for video messages
+  const renderMessageVideo = (props: any) => {
+    if (!props.currentMessage.video) return null;
+    const videoSource = props.currentMessage.video;
+    return (
+      <View style={{ position: 'relative', marginVertical: 4 }}>
+        <TouchableOpacity
+          style={{ position: 'absolute', top: 6, right: 6, zIndex: 1 }}
+          onPress={() => handleDownload(videoSource, 'video')}
+        >
+          <Ionicons name="download-outline" size={24} color="white" />
+        </TouchableOpacity>
+        <Video
+          source={{ uri: videoSource }}
+          style={{ width: 200, height: 150, borderRadius: 13 }}
+          useNativeControls
+          resizeMode={ResizeMode.COVER}
+        />
+      </View>
+    );
+  };
+
+  // Animation functions for drawer
+  const openDrawer = () => {
+    setDrawerVisible(true);
+    Animated.timing(drawerAnimation, {
+      toValue: 0,
+      duration: 250,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const closeDrawer = () => {
+    Animated.timing(drawerAnimation, {
+      toValue: 300,
+      duration: 250,
+      useNativeDriver: true,
+    }).start(() => {
+      setDrawerVisible(false);
+    });
+  };
+
+  // Drawer component
+  const renderDrawer = () => {
+    if (!drawerVisible) return null;
+    
+    return (
+      <View style={styles.drawerContainer}>
+        <Pressable style={styles.drawerOverlay} onPress={closeDrawer} />
+        <Animated.View 
+          style={[
+            styles.drawer, 
+            { 
+              backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#FFFFFF',
+              transform: [{ translateX: drawerAnimation }],
+            }
+          ]}
+        >
+          {/* Channel info section */}
+          <View style={styles.drawerHeader}>
+            <Text style={[styles.drawerTitle, { color: colors.text }]}>
+              #{channel?.name || 'Channel'}
+            </Text>
+            <Text style={[styles.drawerSubtitle, { color: colors.secondaryText }]}>
+              {channel?.description || 'No description'}
+            </Text>
+          </View>
+          
+          {/* Users section */}
+          <View style={styles.drawerSection}>
+            <Text style={[styles.sectionTitle, { color: colors.secondaryText }]}>
+              MEMBERS ({channelUsers.length})
+            </Text>
+            <ScrollView style={styles.userList}>
+              {channelUsers.map(user => (
+                <View key={user.id} style={styles.userItem}>
+                  <View style={styles.userAvatarContainer}>
+                    <Image 
+                      source={{ uri: user.avatar || 'https://via.placeholder.com/40' }} 
+                      style={styles.userAvatar} 
+                    />
+                    <View style={[
+                      styles.statusIndicator, 
+                      { backgroundColor: user.status === 'online' ? '#2BAC76' : 
+                                        user.status === 'idle' ? '#FFCC00' : '#8E8E93' }
+                    ]} />
+                  </View>
+                  <Text style={[styles.userName, { color: colors.text }]}>
+                    {user.username}
+                  </Text>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        </Animated.View>
+      </View>
+    );
+  };
+
+  // Toggle info dropdown with type-safe implementation
+  const toggleInfoBox = () => {
+    if (!infoVisible && infoButtonRef.current) {
+      // Measure the position of the info button to position the dropdown
+      infoButtonRef.current.measure?.((x, y, width, height, pageX, pageY) => {
+        setInfoPosition({
+          top: pageY + height + 5,
+          right: 10,
+        });
+        setInfoVisible(true);
+      });
+    } else {
+      setInfoVisible(false);
+    }
+  };
+
+  // Info box component - replaces the modal
+  const renderInfoBox = () => {
+    if (!infoVisible) return null;
+    
+    return (
+      <View style={styles.infoBoxOverlay} onTouchStart={() => setInfoVisible(false)}>
+        <Animated.View 
+          style={[
+            styles.infoBox, 
+            { 
+              backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#FFFFFF',
+              top: infoPosition.top,
+              right: infoPosition.right,
+            }
+          ]}
+          onTouchStart={(e) => e.stopPropagation()}
+        >
+          <View style={styles.infoBoxHeader}>
+            <Ionicons name="lock-closed" size={18} color={colors.primary} />
+            <Text style={[styles.infoBoxTitle, { color: colors.text }]}>
+              End-to-End Encrypted
+            </Text>
+          </View>
+          
+          <Text style={[styles.infoBoxText, { color: colors.text }]}>
+            Messages in this channel are end-to-end encrypted. Only members of this garden can read them.
+          </Text>
+          
+          <Text style={[styles.infoBoxText, { color: colors.secondaryText, fontSize: 12, marginTop: 4 }]}>
+            Encryption keys are stored locally on your device.
+          </Text>
+        </Animated.View>
+      </View>
+    );
+  };
+
+  // Updated render header function
   const renderHeader = () => {
     return (
       <View style={[styles.header, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#FFFFFF' }]}>
@@ -732,12 +1142,43 @@ export default function ChannelScreen() {
           </Text>
         </View>
         
-        <TouchableOpacity style={styles.headerInfo}>
-          <Ionicons name="information-circle-outline" size={24} color={colors.primary} />
-        </TouchableOpacity>
+        <View style={styles.headerRightButtons}>
+          <TouchableOpacity style={styles.hamburgerButton} onPress={openDrawer}>
+            <Ionicons name="menu" size={22} color={colors.primary} />
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            ref={infoButtonRef}
+            style={styles.headerInfo} 
+            onPress={toggleInfoBox}
+          >
+            <Ionicons name="information-circle-outline" size={22} color={colors.primary} />
+          </TouchableOpacity>
+        </View>
       </View>
     );
   };
+
+  // Improve the debug display with more info and a refresh button
+  const renderDebugInfo = () => (
+    <View style={{ 
+      position: 'absolute', 
+      top: 100, 
+      right: 10, 
+      backgroundColor: 'rgba(0,0,0,0.8)', 
+      padding: 8, 
+      borderRadius: 4,
+      zIndex: 999 
+    }}>
+      <TouchableOpacity onPress={refreshKey}>
+        <Text style={{color: 'white', fontSize: 10}}>
+          {isLoading ? 'LOADING' : `READY (${messages.length})`}
+          {'\n'}
+          {debugInfo}
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
 
   return (
     <SafeAreaView
@@ -748,16 +1189,32 @@ export default function ChannelScreen() {
     >
       <StatusBar barStyle={colorScheme === 'dark' ? 'light-content' : 'dark-content'} />
       
-      {/* Debug: show loading/key state */}
-      <View style={{ position: 'absolute', top: 100, right: 20, backgroundColor: 'rgba(0,0,0,0.5)', padding: 8, zIndex: 999 }}>
-        <Text style={{color: 'white', fontSize: 10}}>
-          {isLoading ? 'LOADING' : `READY (${messages.length})`}
-          {groupKey ? ' [KEY OK]' : ' [NO KEY]'}
-        </Text>
-      </View>
+      {/* Debug info */}
+      {renderDebugInfo()}
       
       {/* Custom Header */}
       {renderHeader()}
+      
+      {/* Render drawer */}
+      {renderDrawer()}
+      
+      {/* Render info dropdown box */}
+      {renderInfoBox()}
+      
+      {selectedImage && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setSelectedImage(null)}>
+          <View style={styles.imageModalOverlay}>
+            <TouchableOpacity style={styles.imageModalClose} onPress={() => setSelectedImage(null)}>
+              <Ionicons name="close-circle" size={36} color="white" />
+            </TouchableOpacity>
+            <Image
+              source={{ uri: selectedImage }}
+              style={styles.imageModalImage}
+              resizeMode="contain"
+            />
+          </View>
+        </Modal>
+      )}
       
       {isLoading && messages.length === 0 ? (
         <View style={styles.loadingContainer}>
@@ -785,6 +1242,8 @@ export default function ChannelScreen() {
             renderSend={renderSend}
             renderActions={renderActions}
             renderMessageAudio={renderMessageAudio}
+            renderMessageImage={renderMessageImage}
+            renderMessageVideo={renderMessageVideo}
             maxComposerHeight={120}
             minComposerHeight={36}
             keyboardShouldPersistTaps="handled"
@@ -862,6 +1321,17 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
   },
+  headerRightButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  hamburgerButton: {
+    padding: 4,
+    marginRight: 8,
+  },
+  headerInfo: {
+    padding: 4,
+  },
   channelName: {
     fontSize: 16,
     fontWeight: '600',
@@ -869,9 +1339,6 @@ const styles = StyleSheet.create({
   gardenName: {
     fontSize: 12,
     marginTop: 2,
-  },
-  headerInfo: {
-    padding: 4,
   },
   sendButtonContainer: {
     width: 36,
@@ -947,6 +1414,134 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 14,
     fontWeight: '500',
+  },
+  drawerContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1000,
+  },
+  drawerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  drawer: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 280,
+    paddingTop: 50,
+    borderLeftWidth: 1,
+    borderLeftColor: 'rgba(0, 0, 0, 0.1)',
+    zIndex: 1001,
+  },
+  drawerHeader: {
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  drawerTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  drawerSubtitle: {
+    fontSize: 14,
+  },
+  drawerSection: {
+    padding: 16,
+  },
+  sectionTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  userList: {
+    maxHeight: '85%',
+  },
+  userItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  userAvatarContainer: {
+    position: 'relative',
+    marginRight: 12,
+  },
+  userAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  statusIndicator: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    borderWidth: 1,
+    borderColor: 'white',
+  },
+  userName: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  infoBoxOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1000,
+    backgroundColor: 'transparent',
+  },
+  infoBox: {
+    position: 'absolute',
+    width: 250,
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+    zIndex: 1001,
+  },
+  infoBoxHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  infoBoxTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  infoBoxText: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  imageModalOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center', zIndex: 1002,
+  },
+  imageModalImage: {
+    width: '80%', height: '80%', resizeMode: 'contain',
+  },
+  imageModalClose: {
+    position: 'absolute',
+    top: 40,
+    right: 20,
+    zIndex: 1003,
   },
 });
 

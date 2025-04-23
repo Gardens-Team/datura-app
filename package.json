@@ -15,6 +15,7 @@
   "dependencies": {
     "@electric-sql/client": "^1.0.3",
     "@electric-sql/pglite": "^0.2.17",
+    "@expo/server": "^0.5.3",
     "@expo/vector-icons": "^14.0.2",
     "@legendapp/motion": "^2.4.0",
     "@react-navigation/drawer": "^7.3.9",
@@ -69,7 +70,8 @@
     "tailwind-merge": "^3.2.0",
     "tailwindcss-animate": "^1.0.7",
     "tweetnacl": "^1.0.3",
-    "tweetnacl-util": "^0.15.1"
+    "tweetnacl-util": "^0.15.1",
+    "expo-media-library": "~17.0.6"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
