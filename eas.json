@@ -10,7 +10,11 @@
       "android": {
         "buildType": "apk",
         "gradleCommand": ":app:assembleDebug",
-        "prebuildCommand": "yarn prebuild:libsodium"
+        "prebuildCommand": "yarn prebuild:libsodium",
+        "credentialsSource": "remote"
+      },
+      "env": {
+        "GOOGLE_SERVICES_FILE": "{{secrets.GOOGLE_SERVICES_JSON}}"
       }
     },
     "preview": {
@@ -23,7 +27,11 @@
     "production": {
       "autoIncrement": true,
       "android": {
-        "prebuildCommand": "yarn prebuild:libsodium"
+        "prebuildCommand": "yarn prebuild:libsodium",
+        "credentialsSource": "remote"
+      },
+      "env": {
+        "GOOGLE_SERVICES_FILE": "{{secrets.GOOGLE_SERVICES_JSON}}"
       }
     }
   },
