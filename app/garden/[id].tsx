@@ -64,10 +64,20 @@ export default function GardenScreen() {
         
         // Check if user is creator or admin
         if (user && data) {
-          const isCreator = data.creator_id === user.id;
-          // You would check for admin status here if you have that data
-          // For now we'll just use creator status
-          setIsCreatorOrAdmin(isCreator);
+          // creator, admin, or moderator roles can see the system feed
+          let hasAdminAccess = data.creator === user.id;
+          if (!hasAdminAccess) {
+            const { data: membership, error: memErr } = await supabase
+              .from('memberships')
+              .select('role')
+              .eq('garden_id', data.id)
+              .eq('user_id', user.id)
+              .single();
+            if (!memErr && membership && ['admin', 'moderator'].includes(membership.role)) {
+              hasAdminAccess = true;
+            }
+          }
+          setIsCreatorOrAdmin(hasAdminAccess);
         }
         
         // Set the navigation title
@@ -106,10 +116,18 @@ export default function GardenScreen() {
     ? channels.filter(c => c.name.toLowerCase().includes(searchQuery.toLowerCase()))
     : channels;
 
-  // Group channels by category (for now we have just one group)
-  const channelGroups = {
-    'Channels': filteredChannels,
-  };
+  // Split into system (Admin Feed) and user channels
+  const systemChannels = filteredChannels.filter(
+    c => c.name === 'Admin Feed' || c.name === 'admin-feed'
+  );
+  const userChannels = filteredChannels.filter(
+    c => !['Admin Feed', 'admin-feed'].includes(c.name)
+  );
+
+  // Build channel groups: show system group only to creators/admins
+  const channelGroups: Record<string, Channel[]> = {};
+  if (isCreatorOrAdmin) channelGroups['System'] = systemChannels;
+  channelGroups['Channels'] = userChannels;
 
   // Render each channel in Slack-like style
   const renderChannel = ({ item }: { item: Channel }) => (

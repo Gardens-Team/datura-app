@@ -52,6 +52,7 @@ import { Channel, Garden } from '@/services/garden-service';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useEffect as useDebugEffect } from 'react';
 import * as Sharing from 'expo-sharing';
+import AdminNotification from '@/components/AdminNotification';
 
 // Custom interface for the recording state
 interface RecordingState {
@@ -1180,6 +1181,79 @@ export default function ChannelScreen() {
     </View>
   );
 
+  // Custom render for system messages including admin notifications
+  const renderSystemMessage = (props: any) => {
+    try {
+      // Check if this is a system notification message
+      if (props.currentMessage.user?._id === 'system') {
+        // Parse the content
+        let notification;
+        try {
+          // If it's JSON content, parse it
+          notification = JSON.parse(props.currentMessage.text);
+        } catch (e) {
+          // Not JSON, just use text as is
+          return (
+            <View style={{ 
+              padding: 10, 
+              backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#F2F2F7',
+              borderRadius: 8,
+              margin: 10,
+              alignItems: 'center'
+            }}>
+              <Text style={{ color: colors.secondaryText, fontStyle: 'italic' }}>
+                {props.currentMessage.text}
+              </Text>
+            </View>
+          );
+        }
+        
+        // If it's a membership request notification, render AdminNotification component
+        if (notification.type === 'membership_request') {
+          const { type, userId, username, profilePic, timestamp, actionRequired } = notification;
+          return (
+            <AdminNotification 
+              type={type}
+              userId={userId}
+              username={username}
+              profilePic={profilePic}
+              timestamp={timestamp}
+              actionRequired={actionRequired}
+              gardenId={channel?.garden_id || ''}
+              onAction={() => {
+                // Refresh messages after action
+                fetchMessages(id as string, groupKey || undefined)
+                  .then(msgs => setMessages(msgs));
+              }}
+            />
+          );
+        }
+        
+        // Other system message types can be handled here
+        return (
+          <View style={{ 
+            padding: 10, 
+            backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#F2F2F7',
+            borderRadius: 8,
+            margin: 10 
+          }}>
+            <Text style={{ color: colors.text }}>
+              {typeof props.currentMessage.text === 'string' 
+                ? props.currentMessage.text 
+                : 'System Notification'}
+            </Text>
+          </View>
+        );
+      }
+      
+      // Not a system message, use default renderer
+      return undefined;
+    } catch (error) {
+      console.error('Error rendering system message:', error);
+      return null;
+    }
+  };
+
   return (
     <SafeAreaView
       style={[
@@ -1244,6 +1318,7 @@ export default function ChannelScreen() {
             renderMessageAudio={renderMessageAudio}
             renderMessageImage={renderMessageImage}
             renderMessageVideo={renderMessageVideo}
+            renderSystemMessage={renderSystemMessage}
             maxComposerHeight={120}
             minComposerHeight={36}
             keyboardShouldPersistTaps="handled"

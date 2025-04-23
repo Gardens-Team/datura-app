@@ -15,6 +15,7 @@ export interface UserProfile {
   id: string;
   username: string;
   profile_pic: string;
+  publicKey: string;
 }
 
 const PANEL_WIDTH = 72; // Width of the server list panel

@@ -25,6 +25,9 @@ npm-debug.*
 yarn-debug.*
 yarn-error.*
 
+# firebase
+google-services.json
+
 # macOS
 .DS_Store
 *.pem
