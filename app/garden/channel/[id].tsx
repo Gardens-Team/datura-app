@@ -29,6 +29,7 @@ import {
   Send,
   Actions,
   IMessage,
+  Avatar,
 } from 'react-native-gifted-chat';
 import { Audio, AVPlaybackStatus, ResizeMode, Video } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
@@ -47,8 +48,9 @@ import {
   useMessageService,
   subscribeToChannel,
   getGroupKeyForChannel,
+  deleteMessage,
 } from '@/services/message-service';
-import { Channel, Garden } from '@/services/garden-service';
+import { Channel, Garden, isChannelLocked as checkChannelLocked } from '@/services/garden-service';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useEffect as useDebugEffect } from 'react';
 import * as Sharing from 'expo-sharing';
@@ -166,7 +168,7 @@ const MessageAudio = ({ currentMessage, audioStyle }: { currentMessage: IMessage
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
   
-  const styles = {
+  const audioStyles = {
     container: {
       backgroundColor: 'transparent',
       marginTop: 6,
@@ -188,6 +190,12 @@ const MessageAudio = ({ currentMessage, audioStyle }: { currentMessage: IMessage
       justifyContent: 'center' as const,
       ...(audioStyle?.playPauseButton || {})
     },
+    playIcon: {
+      ...(audioStyle?.playIcon || {}),
+    },
+    pauseIcon: {
+      ...(audioStyle?.pauseIcon || {}),
+    },
     duration: {
       marginLeft: 12,
       fontSize: 14,
@@ -197,17 +205,18 @@ const MessageAudio = ({ currentMessage, audioStyle }: { currentMessage: IMessage
   };
   
   return (
-    <View style={styles.container}>
-      <View style={styles.wrapper}>
-        <TouchableOpacity style={styles.playPauseButton} onPress={handlePlayPause}>
-          <Ionicons
-            name={isPlaying ? 'pause' : 'play'}
-            size={20}
-            color="white"
+    <View style={audioStyles.container}>
+      <View style={audioStyles.wrapper}>
+        <TouchableOpacity style={audioStyles.playPauseButton} onPress={handlePlayPause}>
+          <Ionicons 
+            name={isPlaying ? 'pause' : 'play'} 
+            size={24} 
+            color="white" 
+            style={isPlaying ? audioStyles.pauseIcon : audioStyles.playIcon}
           />
         </TouchableOpacity>
-        <Text style={styles.duration}>
-          {isPlaying ? formatTime(position) : formatTime(duration)}
+        <Text style={audioStyles.duration}>
+          {formatTime(position)} / {formatTime(duration)}
         </Text>
       </View>
     </View>
@@ -256,6 +265,16 @@ export default function ChannelScreen() {
   const recordingTimer = useRef<NodeJS.Timeout | null>(null);
 
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [channelLocked, setChannelLocked] = useState(false);
+  const [replyTo, setReplyTo] = useState<IMessage | null>(null);
+  const [profileModalVisible, setProfileModalVisible] = useState(false);
+  const [profileUser, setProfileUser] = useState<ChannelUser | null>(null);
+  const [userProfiles, setUserProfiles] = useState<Record<string, { username: string, profile_pic: string }>>({});
+
+  // Determine current user's role
+  const currentMember = channelUsers.find(u => u.id === user?.id);
+  const currentRole = currentMember?.role;
+  const isAdminUser = currentRole === 'creator' || currentRole === 'admin' || currentRole === 'moderator';
 
   // Fetch channel and garden info
   useEffect(() => {
@@ -271,6 +290,14 @@ export default function ChannelScreen() {
         if (channelError) throw channelError;
         
         setChannel(channelData);
+        
+        // Check if the channel is locked
+        try {
+          const locked = await checkChannelLocked(id as string);
+          setChannelLocked(locked);
+        } catch (error) {
+          console.error('Error checking channel lock status:', error);
+        }
         
         // fetch related garden separately (no foreign key join required)
         if (channelData && channelData.garden_id) {
@@ -370,33 +397,97 @@ export default function ChannelScreen() {
     fetchChannelUsers();
   }, [channel, id]);
 
-  // --- Initial load + live subscription ------------------------------
-  useEffect(() => {
-    let unsub: () => void;
-    (async () => {
-      setIsLoading(true);
-      try {
-        // First get the key for this channel
-        if (user) {
-          const key = await getGroupKeyForChannel(id as string, user.id);
-          setGroupKey(key || null);
-          setDebugInfo(key ? `KEY: ${key.substring(0, 5)}...` : 'NO KEY');
+  // Add a function to fetch user profiles for message senders
+  const fetchUserProfiles = useCallback(async (messageUserIds: string[]) => {
+    if (!messageUserIds.length) return;
+    
+    // Filter out duplicates and already fetched users
+    const uniqueUserIds = [...new Set(messageUserIds)].filter(
+      id => !userProfiles[id] && id !== 'system'
+    );
+    
+    if (!uniqueUserIds.length) return;
+    
+    console.log(`[ChannelScreen] Fetching profiles for ${uniqueUserIds.length} users`);
+    
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, username, profile_pic')
+        .in('id', uniqueUserIds);
+        
+      if (error) {
+        console.error('[ChannelScreen] Error fetching user profiles:', error);
+        return;
+      }
+      
+      if (data && data.length) {
+        const newProfiles = data.reduce((acc, user) => {
+          acc[user.id] = { 
+            username: user.username, 
+            profile_pic: user.profile_pic 
+          };
+          return acc;
+        }, {} as Record<string, { username: string, profile_pic: string }>);
+        
+        setUserProfiles(prev => ({ ...prev, ...newProfiles }));
+      }
+    } catch (err) {
+      console.error('[ChannelScreen] Failed to fetch user profiles:', err);
+    }
+  }, [userProfiles]);
+
+  // Modify the fetchMessages function to get user profiles
+  const loadMessages = useCallback(async () => {
+    if (!id) return;
+    console.log(`[ChannelScreen] Loading messages for channel ${id}`);
+    
+    setIsLoading(true);
+    try {
+      const msgs = await fetchMessages(id as string, groupKey!);
+      console.log(`[ChannelScreen] Retrieved ${msgs.length} messages`);
+      
+      // Extract all unique user IDs from messages
+      const userIds = msgs
+        .map(msg => msg.user._id.toString())
+        .filter(id => id && id !== 'system');
+        
+      // Fetch user profiles if needed
+      await fetchUserProfiles(userIds);
+      
+      // Enrich messages with user profile data
+      const enrichedMessages = msgs.map(msg => {
+        const userId = msg.user._id.toString();
+        const profile = userProfiles[userId];
+        
+        if (profile) {
+          return {
+            ...msg,
+            user: {
+              ...msg.user,
+              name: profile.username || msg.user.name,
+              avatar: profile.profile_pic || msg.user.avatar
+            }
+          };
         }
         
-        const initialMsgs = await fetchMessages(id as string, groupKey || undefined);
-        setMessages(initialMsgs);
-      } catch (e) {
-        console.error('Failed to load messages:', e);
-        setDebugInfo(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
-      } finally {
-        setIsLoading(false);
-      }
-      unsub = await subscribeToChannel(id as string, newMsgs => {
-        setMessages(prev => GiftedChat.append(prev, newMsgs));
+        return msg;
       });
-    })();
-    return () => unsub?.();
-  }, [id, user]);
+      
+      setMessages(enrichedMessages);
+    } catch (error) {
+      console.error('[ChannelScreen] Error loading messages:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [id, fetchMessages, groupKey, userProfiles, fetchUserProfiles]);
+
+  // Replace the existing useEffect for message loading
+  useEffect(() => {
+    if (groupKey) {
+      loadMessages();
+    }
+  }, [groupKey, loadMessages]);
 
   // Manual function to force key refresh if needed
   const refreshKey = async () => {
@@ -656,32 +747,168 @@ export default function ChannelScreen() {
     }
   };
 
-  // Send a text message
-  const onSend = useCallback(async (newMessages: IMessage[] = []) => {
-    if (!user) return;
-    
-    try {
-    setMessages(prev => GiftedChat.append(prev, newMessages));
-    const m = newMessages[0];
-      
-      // Create the extended message with user details
-      const extendedMsg: ExtendedMessage = {
-        ...m,
-        user: {
-          _id: user.id,
-          name: user.username,
-          avatar: user.profile_pic,
-        },
-      };
-      
-      await sendMessage(id as string, extendedMsg, groupKey!);
-    } catch (error) {
-      console.error('Failed to send message:', error);
-      // Remove the optimistically added message
-      setMessages(prev => prev.filter(msg => msg._id !== newMessages[0]._id));
-      Alert.alert('Error', 'Failed to send message');
+  // Handle long press on message for reply or delete
+  const handleLongPressMessage = useCallback((context: any, message: IMessage) => {
+    const options: string[] = ['Reply'];
+    const actions: Array<() => void> = [() => setReplyTo(message)];
+
+    // Check delete permission
+    const msgMember = channelUsers.find(u => u.id === message.user._id);
+    const msgRole = msgMember?.role;
+    const canDelete = message.user._id === user?.id || (isAdminUser && msgRole !== 'creator' && msgRole !== 'admin');
+    if (canDelete) {
+      options.push('Delete');
+      actions.push(async () => {
+        try {
+          await deleteMessage(message._id as string);
+          // remove from local state
+          setMessages(prev => prev.filter(m => m._id !== message._id));
+        } catch (e) {
+          console.error('Failed to delete message', e);
+          Alert.alert('Error', 'Failed to delete message');
+        }
+      });
     }
-  }, [groupKey, id, user, sendMessage]);
+
+    options.push('Cancel');
+    actions.push(() => {});
+
+    Alert.alert('Message Actions', '', options.map((opt, i) => ({ text: opt, onPress: actions[i], style: opt === 'Delete' ? 'destructive' : 'default' })), { cancelable: true });
+  }, [channelUsers, isAdminUser, user]);
+
+  // Wrap bubble to handle long press
+  const renderBubbleWithLongPress = (props: any) => (
+    <TouchableOpacity
+      activeOpacity={0.8}
+      onLongPress={() => handleLongPressMessage(props, props.currentMessage)}
+    >
+      <Bubble {...props} />
+    </TouchableOpacity>
+  );
+
+  // Render reply preview above composer
+  const renderAccessory = () => replyTo ? (
+    <View style={[styles.replyPreview, { backgroundColor: colorScheme === 'dark' ? '#333' : '#f0f0f0' }]}>
+      <TouchableOpacity onPress={() => setReplyTo(null)} style={styles.replyCancel}>
+        <Ionicons name="close" size={16} color={colors.secondaryText} />
+      </TouchableOpacity>
+      <Text style={[styles.replyUsername, { color: colors.primary }]}>
+        Replying to {replyTo.user.name}
+      </Text>
+      <Text numberOfLines={1} style={[styles.replyText, { color: colors.text }]}>
+        {replyTo.text || 'Media...' }
+      </Text>
+    </View>
+  ) : null;
+
+  // Handle send including replyTo
+  const onSend = useCallback(async (newMessages: IMessage[] = []) => {
+    if (!user || !newMessages.length) return;
+    // locked check omitted for brevity
+    const m = newMessages[0];
+    const extendedMsg: ExtendedMessage = {
+      ...m,
+      user: { _id: user.id, name: user.username, avatar: user.profile_pic },
+      replyTo: replyTo? replyTo._id as string : undefined,
+    };
+    setMessages(prev => GiftedChat.append(prev, [extendedMsg]));
+    setReplyTo(null);
+    await sendMessage(id as string, extendedMsg, groupKey!);
+  }, [user, id, groupKey, replyTo, sendMessage]);
+
+  // Handle avatar press
+  const onAvatarPress = (avatarUser: any) => {
+    const cu = channelUsers.find(u => u.id === avatarUser._id);
+    if (cu) {
+      if (cu.id === user?.id) {
+        // Handle click on own avatar differently if needed
+        return;
+      }
+      
+      // First show the profile card
+      setProfileUser(cu);
+      setProfileModalVisible(true);
+    }
+  };
+
+  // Navigation to DM from profile modal
+  const navigateToDM = (userId: string) => {
+    setProfileModalVisible(false);
+    router.push(`/(tabs)/dm/${userId}`);
+  };
+
+  // Custom user avatar with online status indicator
+  const renderAvatar = (props: any) => {
+    const { currentMessage } = props;
+    const cu = channelUsers.find(u => u.id === currentMessage.user._id);
+    const userId = currentMessage.user._id.toString();
+    const profile = userProfiles[userId];
+    
+    // Get profile picture from userProfiles if available
+    const avatarUrl = profile?.profile_pic || currentMessage.user.avatar || '';
+    
+    return (
+      <TouchableOpacity onPress={() => onAvatarPress(currentMessage.user)}>
+        <View style={styles.avatarContainer}>
+          {/* Use Image directly for better control and fallback */}
+          {avatarUrl ? (
+            <Image 
+              source={{ uri: avatarUrl }} 
+              style={styles.avatarImage} 
+            />
+          ) : (
+            <View style={[styles.avatarFallback, { backgroundColor: colors.border }]}>
+              <Text style={[styles.avatarFallbackText, { color: colors.text }]}>
+                {profile?.username?.charAt(0).toUpperCase() || 
+                 currentMessage.user.name?.charAt(0).toUpperCase() || 
+                 '?'} 
+              </Text>
+            </View>
+          )}
+          {cu && (
+            <View 
+              style={[
+                styles.statusIndicator, 
+                { backgroundColor: cu.status === 'online' ? '#4CAF50' : 
+                                      cu.status === 'idle' ? '#FF9800' : '#9E9E9E' }
+              ]} 
+            />
+          )}
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  // Update the renderCustomView to show username from userProfiles
+  const renderCustomView = (props: any) => {
+    const { currentMessage } = props;
+    const userId = currentMessage.user._id.toString();
+    const profile = userProfiles[userId];
+    const cu = channelUsers.find(u => u.id === currentMessage.user._id);
+    const isCurrentUser = currentMessage.user._id === user?.id;
+    
+    // Don't show custom view for own messages
+    if (isCurrentUser) return null;
+    
+    const displayName = profile?.username || cu?.username || currentMessage.user.name || 'User';
+    
+    return (
+      <View style={[styles.customView, { alignSelf: 'flex-start' }]}>
+        <Text style={[styles.username, { color: colors.primary }]}>
+          {displayName}
+        </Text>
+        
+        {currentMessage.replyTo && (
+          <View style={styles.replyIndicator}>
+            <Ionicons name="return-up-back" size={12} color={colors.secondaryText} />
+            <Text style={styles.replyText} numberOfLines={1}>
+              Replying to a message
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  };
 
   // Customize bubble component
   const renderBubble = (props: any) => {
@@ -691,9 +918,20 @@ export default function ChannelScreen() {
         wrapperStyle={{
           left: {
             backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#F2F2F7',
+            borderRadius: 18,
+            marginBottom: 2,
+            marginLeft: 0,
+            marginRight: 60,
+            paddingVertical: 6,
+            paddingHorizontal: 12,
           },
           right: {
             backgroundColor: colors.primary,
+            borderRadius: 18,
+            marginBottom: 2,
+            marginLeft: 60,
+            paddingVertical: 6,
+            paddingHorizontal: 12,
           },
         }}
         tickStyle={{ color: colors.secondaryText }}
@@ -737,14 +975,29 @@ export default function ChannelScreen() {
   
   // Custom input toolbar
   const renderInputToolbar = (props: any) => {
+    // If channel is locked, show locked message instead of input
+    if (channelLocked) {
+      return (
+        <View style={[
+          styles.lockedContainer, 
+          { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7' }
+        ]}>
+          <Ionicons name="lock-closed" size={18} color={colors.secondaryText} />
+          <Text style={[styles.lockedText, { color: colors.secondaryText }]}>
+            This channel has been locked by an admin
+          </Text>
+        </View>
+      );
+    }
+    
     // If in recording mode, show recording controls
     if (recording.isRecording) {
       return (
-        <View style={[styles.recordingContainer, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7' }]}>
+        <View style={[styles.recordingContainer, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F9F9F9' }]}>
           <View style={styles.recordingInfo}>
             <View style={styles.recordingIndicator} />
             <Text style={[styles.recordingText, { color: colors.text }]}>
-              Recording {formatTime(recording.recordingDuration)}
+              Recording... {formatTime(recording.recordingDuration)}
             </Text>
           </View>
           <View style={styles.recordingActions}>
@@ -761,8 +1014,8 @@ export default function ChannelScreen() {
     
     // If recording is done, show preview with send button
     if (recording.isDoneRecording && recording.recordingUri) {
-  return (
-        <View style={[styles.recordingContainer, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7' }]}>
+      return (
+        <View style={[styles.recordingContainer, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F9F9F9' }]}>
           <View style={styles.recordingInfo}>
             <Ionicons name="mic" size={20} color={colors.primary} />
             <Text style={[styles.recordingText, { color: colors.text }]}>
@@ -775,7 +1028,7 @@ export default function ChannelScreen() {
             </TouchableOpacity>
             <TouchableOpacity style={styles.sendButton} onPress={sendAudioMessage}>
               <Text style={styles.sendText}>Send</Text>
-      </TouchableOpacity>
+            </TouchableOpacity>
           </View>
         </View>
       );
@@ -788,8 +1041,8 @@ export default function ChannelScreen() {
         containerStyle={{
           backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
           borderTopWidth: 1,
-          borderTopColor: colorScheme === 'dark' ? '#38383A' : '#C7C7CC',
-          paddingHorizontal: 8,
+          borderTopColor: colors.border,
+          paddingHorizontal: 6,
         }}
         primaryStyle={{ alignItems: 'center' }}
       />
@@ -811,12 +1064,13 @@ export default function ChannelScreen() {
         textInputStyle={{
           color: colors.text,
           backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#FFFFFF',
-          borderRadius: 20,
+          borderRadius: 18,
           paddingHorizontal: 12,
           paddingTop: 8,
           paddingBottom: 8,
-          marginRight: 4,
-          marginLeft: 0,
+          marginRight: 6,
+          marginLeft: 6,
+          minHeight: 38,
         }}
         placeholder="Message"
         placeholderTextColor={colors.secondaryText}
@@ -837,16 +1091,16 @@ export default function ChannelScreen() {
           width: 44,
         }}
       >
-        <View style={[
-          styles.sendButtonContainer,
-          { backgroundColor: props.text ? colors.primary : 'transparent' }
-        ]}>
-          <Ionicons
-            name="send"
-            size={20}
-            color={props.text ? 'white' : colors.secondaryText}
-          />
-        </View>
+        {/* Show Mic icon if no text, Send icon if text */}
+        {props.text.trim().length > 0 ? (
+          <View style={[styles.sendButtonContainer, { backgroundColor: colors.primary }]}>
+            <Ionicons name="send" size={18} color="white" />
+          </View>
+        ) : (
+          <View style={styles.sendButtonContainer}> 
+            <Ionicons name="mic" size={22} color={colors.primary} />
+          </View>
+        )}
       </Send>
     );
   };
@@ -867,7 +1121,8 @@ export default function ChannelScreen() {
           'Record Audio': startRecording,
           'Cancel': () => {},
         }}
-        optionTintColor={colors.text}
+        optionTintColor={colors.primary}
+        wrapperStyle={styles.actionsWrapper}
       />
     );
   };
@@ -904,7 +1159,12 @@ export default function ChannelScreen() {
             marginTop: 6,
           },
           wrapper: {
-            backgroundColor: 'transparent',
+            backgroundColor: props.position === 'left' 
+              ? (colorScheme === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)') 
+              : 'rgba(255,255,255,0.2)',
+            borderRadius: 12,
+            paddingVertical: 6,
+            paddingHorizontal: 10,
           },
           playPauseButton: {
             backgroundColor: props.position === 'left' ? '#007AFF' : 'white',
@@ -914,8 +1174,12 @@ export default function ChannelScreen() {
             alignItems: 'center',
             justifyContent: 'center',
           },
+          playIcon: { marginLeft: 2 },
+          pauseIcon: {},
           duration: {
             color: props.position === 'left' ? '#8E8E93' : 'rgba(255, 255, 255, 0.7)',
+            marginLeft: 10,
+            fontSize: 13,
           },
         }}
       />
@@ -960,10 +1224,10 @@ export default function ChannelScreen() {
           </Pressable>
 
           {/* Image thumbnail with press to open */}
-          <Pressable onPress={() => setSelectedImage(imageSource)}>
+          <Pressable onPress={() => setSelectedImage(imageSource)} style={styles.mediaContainer}> 
             <Image
               source={{ uri: imageSource }}
-              style={{ width: 200, height: 150, borderRadius: 13 }}
+              style={styles.messageImage}
               resizeMode="cover"
             />
           </Pressable>
@@ -987,12 +1251,14 @@ export default function ChannelScreen() {
         >
           <Ionicons name="download-outline" size={24} color="white" />
         </TouchableOpacity>
-        <Video
-          source={{ uri: videoSource }}
-          style={{ width: 200, height: 150, borderRadius: 13 }}
-          useNativeControls
-          resizeMode={ResizeMode.COVER}
-        />
+        <Pressable onPress={() => {/* TODO: Open video player? */}} style={styles.mediaContainer}>
+          <Video
+            source={{ uri: videoSource }}
+            style={styles.messageVideo}
+            useNativeControls
+            resizeMode={ResizeMode.COVER}
+          />
+        </Pressable>
       </View>
     );
   };
@@ -1126,18 +1392,94 @@ export default function ChannelScreen() {
     );
   };
 
+  // Profile modal when clicking on avatar
+  const renderProfileModal = () => {
+    if (!profileUser) return null;
+    
+    return (
+      <Modal
+        visible={profileModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setProfileModalVisible(false)}
+      >
+        <TouchableOpacity 
+          style={styles.modalOverlay} 
+          activeOpacity={1} 
+          onPress={() => setProfileModalVisible(false)}
+        >
+          <View style={[
+            styles.profileCard,
+            { backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : 'white' }
+          ]}>
+            <View style={styles.profileHeader}>
+              <Image 
+                source={{ uri: profileUser.avatar || 'https://via.placeholder.com/100' }} 
+                style={styles.profileAvatar} 
+              />
+              <View style={styles.profileInfo}>
+                <Text style={[styles.profileName, { color: colors.text }]}>
+                  {profileUser.username}
+                </Text>
+                <View style={styles.profileStatus}>
+                  <View style={[
+                    styles.statusDot,
+                    { backgroundColor: profileUser.status === 'online' ? '#4CAF50' : 
+                                      profileUser.status === 'idle' ? '#FF9800' : '#9E9E9E' }
+                  ]} />
+                  <Text style={[styles.statusText, { color: colors.secondaryText }]}>
+                    {profileUser.status === 'online' ? 'Online' : 
+                    profileUser.status === 'idle' ? 'Idle' : 'Offline'}
+                  </Text>
+                </View>
+                {profileUser.role && (
+                  <View style={[styles.roleBadge, { 
+                    backgroundColor: profileUser.role === 'admin' ? '#7B1FA2' : 
+                                    profileUser.role === 'creator' ? '#D32F2F' : '#607D8B'
+                  }]}>
+                    <Text style={styles.roleText}>
+                      {profileUser.role.charAt(0).toUpperCase() + profileUser.role.slice(1)}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </View>
+            
+            <View style={styles.profileActions}>
+              <TouchableOpacity 
+                style={[styles.actionButton, { backgroundColor: colors.primary }]}
+                onPress={() => navigateToDM(profileUser.id)}
+              >
+                <Ionicons name="chatbubble" size={18} color="white" />
+                <Text style={styles.actionText}>Send Message</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+    );
+  };
+
   // Updated render header function
   const renderHeader = () => {
     return (
       <View style={[styles.header, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#FFFFFF' }]}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="chevron-back" size={24} color={colors.primary} />
+        <TouchableOpacity 
+          style={styles.backButton} 
+          onPress={() => router.back()}
+        >
+          <Ionicons name="arrow-back" size={24} color={colors.text} />
         </TouchableOpacity>
         
         <View style={styles.headerCenter}>
-          <Text style={[styles.channelName, { color: colors.text }]}>
-            #{channel?.name || 'Channel'}
-          </Text>
+          <View style={styles.headerTitleContainer}>
+            <Text style={[styles.channelName, { color: colors.text }]}>
+              #{channel?.name || 'Channel'}
+            </Text>
+            {channelLocked && (
+              <Ionicons name="lock-closed" size={16} color={colors.text} style={styles.lockIcon} />
+            )}
+          </View>
           <Text style={[styles.gardenName, { color: colors.secondaryText }]}>
             {garden?.name || 'Garden'}
           </Text>
@@ -1254,6 +1596,80 @@ export default function ChannelScreen() {
     }
   };
 
+  // Add back the live subscription effect after we have the groupKey
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    
+    if (groupKey && id) {
+      // Set up live subscription for new messages
+      (async () => {
+        try {
+          console.log(`[ChannelScreen] Setting up live subscription for channel ${id}`);
+          unsub = await subscribeToChannel(id as string, async (newMsgs) => {
+            // Extract user IDs from the new messages
+            const userIds = newMsgs
+              .map(msg => msg.user._id.toString())
+              .filter(id => id && id !== 'system');
+            
+            // Fetch any missing user profiles
+            await fetchUserProfiles(userIds);
+            
+            // Enrich the new messages with user profile data
+            const enrichedNewMsgs = newMsgs.map(msg => {
+              const userId = msg.user._id.toString();
+              const profile = userProfiles[userId];
+              
+              if (profile) {
+                return {
+                  ...msg,
+                  user: {
+                    ...msg.user,
+                    name: profile.username || msg.user.name,
+                    avatar: profile.profile_pic || msg.user.avatar
+                  }
+                };
+              }
+              
+              return msg;
+            });
+            
+            // Append the enriched messages to the existing ones
+            setMessages(prev => GiftedChat.append(prev, enrichedNewMsgs));
+          });
+        } catch (e) {
+          console.error('[ChannelScreen] Failed to setup subscription:', e);
+        }
+      })();
+    }
+    
+    // Cleanup subscription on unmount
+    return () => {
+      if (unsub) {
+        console.log('[ChannelScreen] Cleaning up subscription');
+        unsub();
+      }
+    };
+  }, [id, groupKey, userProfiles, fetchUserProfiles]);
+  
+  // Add an initial effect to get the group key when user ID is available
+  useEffect(() => {
+    const getKey = async () => {
+      if (!user || !id) return;
+      
+      try {
+        console.log(`[ChannelScreen] Getting group key for channel ${id} and user ${user.id}`);
+        const key = await getGroupKeyForChannel(id as string, user.id);
+        setGroupKey(key || null);
+        setDebugInfo(key ? `KEY: ${key.substring(0, 5)}...` : 'NO KEY');
+      } catch (e) {
+        console.error('[ChannelScreen] Failed to get group key:', e);
+        setDebugInfo(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    
+    getKey();
+  }, [id, user]);
+
   return (
     <SafeAreaView
       style={[
@@ -1268,6 +1684,16 @@ export default function ChannelScreen() {
       
       {/* Custom Header */}
       {renderHeader()}
+      
+      {/* Channel locked banner */}
+      {channelLocked && (
+        <View style={[styles.lockedBanner, { backgroundColor: colors.error + '20' }]}>
+          <Ionicons name="lock-closed" size={16} color={colors.error} />
+          <Text style={[styles.lockedBannerText, { color: colors.error }]}>
+            This channel has been locked. No new messages can be sent.
+          </Text>
+        </View>
+      )}
       
       {/* Render drawer */}
       {renderDrawer()}
@@ -1290,6 +1716,9 @@ export default function ChannelScreen() {
         </Modal>
       )}
       
+      {/* Profile Modal */}
+      {renderProfileModal()}
+      
       {isLoading && messages.length === 0 ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={colors.primary} />
@@ -1298,15 +1727,14 @@ export default function ChannelScreen() {
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.flex}
-          keyboardVerticalOffset={insets.top + (Platform.OS === 'ios' ? 60 : 90)}
         >
           <GiftedChat
             messages={messages}
             onSend={onSend}
             user={{
-              _id: user?.id || 'unknown',
-              name: user?.username || 'Unknown User',
-              avatar: user?.profile_pic,
+              _id: user?.id || '',
+              name: user?.username || '',
+              avatar: user?.profile_pic || '',
             }}
             renderBubble={renderBubble}
             renderMessageText={renderMessageText}
@@ -1318,48 +1746,33 @@ export default function ChannelScreen() {
             renderMessageAudio={renderMessageAudio}
             renderMessageImage={renderMessageImage}
             renderMessageVideo={renderMessageVideo}
-            renderSystemMessage={renderSystemMessage}
-            maxComposerHeight={120}
-            minComposerHeight={36}
-            keyboardShouldPersistTaps="handled"
-            messagesContainerStyle={{ paddingBottom: insets.bottom }}
+            renderAvatar={renderAvatar}
+            renderCustomView={renderCustomView}
+            renderAccessory={renderAccessory}
+            isLoadingEarlier={isLoading}
+            onLongPress={handleLongPressMessage}
+            showUserAvatar
+            renderAvatarOnTop
+            showAvatarForEveryMessage
+            renderUsernameOnMessage
+            alwaysShowSend
             scrollToBottomComponent={() => (
               <View style={{
                 backgroundColor: colors.primary,
-                width: 36,
+                width: 36, 
                 height: 36,
                 borderRadius: 18,
                 justifyContent: 'center',
                 alignItems: 'center',
               }}>
                 <Ionicons name="chevron-down" size={24} color="white" />
-    </View>
+              </View>
             )}
-            scrollToBottomStyle={{
-              right: 10,
-              bottom: 10,
-            }}
             infiniteScroll
-            isTyping={typingUsers.length > 0}
-            onInputTextChanged={setInputText}
-            bottomOffset={insets.bottom + 10}
-            textInputProps={{
-              multiline: true,
-              returnKeyType: 'default',
-              enablesReturnKeyAutomatically: true,
-              keyboardAppearance: colorScheme,
-            }}
-            timeTextStyle={{
-              left: { color: colors.secondaryText },
-              right: { color: 'rgba(255, 255, 255, 0.7)' },
-            }}
-            parsePatterns={(linkStyle: TextStyle | undefined) => [
-              { type: 'url', style: { ...(linkStyle || {}), color: colors.primary }, onPress: (url: string) => Linking.openURL(url) },
-              { type: 'phone', style: { ...(linkStyle || {}), color: colors.primary }, onPress: (phone: string) => Linking.openURL(`tel:${phone}`) },
-              { type: 'email', style: { ...(linkStyle || {}), color: colors.primary }, onPress: (email: string) => Linking.openURL(`mailto:${email}`) },
-              { pattern: /#(\w+)/, style: { ...(linkStyle || {}), color: colors.primary } },
-              { pattern: /@(\w+)/, style: { ...(linkStyle || {}), color: colors.primary } },
-            ]}
+            keyboardShouldPersistTaps="handled"
+            bottomOffset={insets.bottom}
+            maxInputLength={1000}
+            placeholder="Type a message..."
           />
         </KeyboardAvoidingView>
       )}
@@ -1390,7 +1803,7 @@ const styles = StyleSheet.create({
     borderBottomColor: 'rgba(0,0,0,0.1)',
   },
   backButton: {
-    padding: 4,
+    padding: 8,
   },
   headerCenter: {
     flex: 1,
@@ -1403,13 +1816,26 @@ const styles = StyleSheet.create({
   hamburgerButton: {
     padding: 4,
     marginRight: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 36,
+    height: 36,
   },
   headerInfo: {
     padding: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 36,
+    height: 36,
   },
   channelName: {
     fontSize: 16,
     fontWeight: '600',
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 4,
   },
   gardenName: {
     fontSize: 12,
@@ -1426,6 +1852,8 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    marginRight: 4,
+    marginBottom: 0,
   },
   actionsContainer: {
     width: 44,
@@ -1464,6 +1892,7 @@ const styles = StyleSheet.create({
   },
   recordingText: {
     fontSize: 14,
+    fontStyle: 'italic',
   },
   recordingActions: {
     flexDirection: 'row',
@@ -1476,7 +1905,7 @@ const styles = StyleSheet.create({
   },
   cancelText: {
     color: 'red',
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '500',
   },
   sendButton: {
@@ -1487,7 +1916,7 @@ const styles = StyleSheet.create({
   },
   sendText: {
     color: 'white',
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '500',
   },
   drawerContainer: {
@@ -1556,14 +1985,15 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
   statusIndicator: {
+    position: 'absolute',
     width: 10,
     height: 10,
     borderRadius: 5,
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
     borderWidth: 1,
     borderColor: 'white',
+    bottom: 0,
+    right: 0,
+    backgroundColor: '#8E8E93',
   },
   userName: {
     fontSize: 14,
@@ -1617,6 +2047,195 @@ const styles = StyleSheet.create({
     top: 40,
     right: 20,
     zIndex: 1003,
+  },
+  headerTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  lockIcon: {
+    marginLeft: 6,
+  },
+  lockedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 6,
+    marginBottom: 6,
+  },
+  lockedBannerText: {
+    marginLeft: 6,
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  lockedContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.1)',
+  },
+  lockedText: {
+    marginLeft: 8,
+    fontSize: 14,
+  },
+  replyPreview: {
+    flexDirection: 'column',
+    padding: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,0,0,0.1)',
+  },
+  replyCancel: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+  },
+  replyUsername: {
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  replyText: {
+    marginTop: 4,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  profileCard: {
+    width: '90%',
+    maxWidth: 340,
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  profileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  profileAvatar: {
+    width: 60,
+    height: 60,
+    borderRadius: 30, 
+    marginRight: 16,
+  },
+  profileInfo: {
+    flex: 1,
+  },
+  profileName: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  profileStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  statusText: {
+    fontSize: 12,
+  },
+  roleBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+  },
+  roleText: {
+    color: 'white',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  profileActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: 8,
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    minWidth: 140,
+  },
+  actionText: {
+    color: 'white',
+    fontWeight: '500',
+    marginLeft: 6,
+  },
+  avatarContainer: {
+    position: 'relative',
+    marginRight: 2,
+  },
+  avatarImage: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  },
+  avatarFallback: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  avatarFallbackText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  customView: {
+    marginTop: -4,
+    marginBottom: 4,
+    marginLeft: 6,
+  },
+  username: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  replyIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: -2,
+  },
+  actionsWrapper: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  mediaContainer: {
+    borderRadius: 13,
+    overflow: 'hidden',
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  messageImage: {
+    width: 200,
+    height: 150,
+    resizeMode: 'cover',
+  },
+  messageVideo: {
+    width: 200,
+    height: 150,
   },
 });
 

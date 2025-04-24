@@ -10,7 +10,7 @@
       "android": {
         "buildType": "apk",
         "gradleCommand": ":app:assembleDebug",
-        "prebuildCommand": "yarn prebuild:libsodium",
+        "prebuildCommand": "yarn prebuild:libsodium && yarn copy-google-services",
         "credentialsSource": "remote"
       },
       "env": {

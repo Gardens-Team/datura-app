@@ -7,12 +7,14 @@ import { Garden } from './garden-service';
 import { insertMessage, getMessagesForChannel, getGroupKeyForChannel, subscribeMessages, MessageRow } from '@/services/sync-service';
 import { useCallback, useState, useEffect } from 'react';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
+import * as SQLite from 'expo-sqlite';
 
 // Extended message interface with garden and encryption support
 export interface ExtendedMessage extends IMessage {
   garden?: Garden;
   recipient?: Recipient;
   ciphertext?: string;
+  replyTo?: string;
 }
 
 // Recipient interface for direct messages
@@ -291,4 +293,25 @@ export async function subscribeToChannel(
 }
 
 // Re-export the function so it can be imported directly
-export { getGroupKeyForChannel }; 
+export { getGroupKeyForChannel };
+
+/**
+ * Delete a message by its ID
+ */
+export async function deleteMessage(messageId: string): Promise<void> {
+  // 1. Delete from Supabase
+  const { error } = await supabase
+    .from('messages')
+    .delete()
+    .eq('id', messageId);
+  if (error) throw error;
+  
+  // 2. Delete from local SQLite database
+  try {
+    const db = await SQLite.openDatabaseAsync('gardens.db');
+    await db.execAsync(`DELETE FROM messages WHERE id = '${messageId}'`);
+    console.log(`[MessageService] Deleted message ${messageId} from local database`);
+  } catch (e) {
+    console.error('[MessageService] Failed to delete message from local database:', e);
+  }
+} 

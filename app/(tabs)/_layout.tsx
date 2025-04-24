@@ -8,8 +8,9 @@ import { useCallback, useRef, useState, useEffect } from 'react';
 import { TabBar } from '@/components/ui/TabBar';
 import { CreateGroupModal } from '@/components/modals/CreateGroupModal';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
-import { getGardensByUser, Garden } from '@/services/garden-service';
+import { getGardensByUser, Garden, decryptGardenImage, getGroupKeyForGarden } from '@/services/garden-service';
 import { useFocusEffect } from 'expo-router';
+import { getStoredPrivateKey } from '@/utils/provisioning';
 
 export interface UserProfile {
   id: string;
@@ -32,10 +33,12 @@ export default function TabLayout() {
   const [isOpen, setIsOpen] = useState(false);
   const translateX = useRef(new Animated.Value(0)).current;
   const pathname = usePathname();
+  const isNotificationsScreen = pathname.includes('/notifications');
   const [showCreate, setShowCreate] = useState(false);
   const router = useRouter();
   const { user } = useCurrentUser();
   const [gardens, setGardens] = useState<Garden[]>([]);
+  const [decryptedLogos, setDecryptedLogos] = useState<Record<string, string>>({});
   
   // Determine if we're on the profile screen
   const isProfileScreen = pathname.includes('/profile');
@@ -55,6 +58,8 @@ export default function TabLayout() {
   const togglePanel = useCallback(() => {
     // Don't allow panel opening on profile screen
     if (isProfileScreen) return;
+    // Or notifications screen
+    if (isNotificationsScreen) return;
     
     const toValue = isOpen ? -PANEL_WIDTH : 0;
     Animated.spring(translateX, {
@@ -63,17 +68,58 @@ export default function TabLayout() {
       ...SPRING_CONFIG,
     }).start();
     setIsOpen(!isOpen);
-  }, [isOpen, translateX, isProfileScreen]);
+  }, [isOpen, translateX, isProfileScreen, isNotificationsScreen]);
+
+  // Decrypt garden logos
+  const decryptGardenLogos = useCallback(async (gardensToDecrypt: Garden[]) => {
+    if (!gardensToDecrypt.length) return;
+    
+    try {
+      const privateKeyBase64 = await getStoredPrivateKey();
+      if (!privateKeyBase64) {
+        console.error('Private key not available for logo decryption');
+        return;
+      }
+      
+      const decryptedLogoMap: Record<string, string> = {};
+      
+      for (const garden of gardensToDecrypt) {
+        if (garden.id && garden.logo && !garden.logo.startsWith('file://')) {
+          try {
+            // Get the garden key for decryption
+            const groupKeyBase64 = await getGroupKeyForGarden(garden.id);
+            
+            // Decrypt the logo
+            const base64Data = await decryptGardenImage(garden.logo, groupKeyBase64);
+            
+            if (base64Data) {
+              // Create a data URL from the base64 image
+              const dataUrl = `data:image/png;base64,${base64Data}`;
+              decryptedLogoMap[garden.id] = dataUrl;
+            }
+          } catch (error) {
+            console.error(`Failed to decrypt logo for garden ${garden.id}:`, error);
+          }
+        }
+      }
+      
+      setDecryptedLogos(decryptedLogoMap);
+    } catch (error) {
+      console.error('Error decrypting garden logos:', error);
+    }
+  }, []);
 
   const fetchGardens = useCallback(async () => {
     if (!user) return;
     try {
       const g = await getGardensByUser(user.id);
       setGardens(g);
+      // Decrypt logos after fetching gardens
+      decryptGardenLogos(g);
     } catch (err) {
       console.error('Failed to fetch gardens', err);
     }
-  }, [user]);
+  }, [user, decryptGardenLogos]);
 
   useFocusEffect(
     useCallback(() => {
@@ -92,9 +138,9 @@ export default function TabLayout() {
           style={[
             styles.content,
             {
-              transform: [{ translateX: isProfileScreen ? new Animated.Value(0) : translateX }],
+              transform: [{ translateX: isProfileScreen || isNotificationsScreen ? new Animated.Value(0) : translateX }],
               paddingBottom: 49 + insets.bottom,
-              marginLeft: isProfileScreen ? 0 : undefined,
+              marginLeft: isProfileScreen || isNotificationsScreen ? 0 : undefined,
             }
           ]}
         >
@@ -141,7 +187,7 @@ export default function TabLayout() {
         </Animated.View>
 
         {/* Left Panel - Server List */}
-        {!isProfileScreen && (
+        {!isProfileScreen && !isNotificationsScreen && (
           <Animated.View 
             style={[
               styles.serverPanel, 
@@ -169,8 +215,14 @@ export default function TabLayout() {
             {gardens.map((g) => (
               <TouchableOpacity key={g.id} style={[styles.serverButton, { backgroundColor: colors.border }]}
                 onPress={() => router.push(`/garden/${g.id}` as const)}>
-                {g.logo ? (
-                  <Image source={{ uri: g.logo }} style={styles.gardenIcon} />
+                {g.id && decryptedLogos[g.id] ? (
+                  <Image 
+                    source={{ uri: decryptedLogos[g.id] }} 
+                    style={styles.gardenIcon}
+                    onError={() => {
+                      console.error(`Failed to load decrypted garden logo for ${g.id}`);
+                    }}
+                  />
                 ) : (
                   <Text style={{ color: colors.text, fontWeight: '600', fontSize: 16 }}>
                     {g.name.charAt(0).toUpperCase()}

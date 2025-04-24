@@ -5,7 +5,7 @@ import { Platform } from 'react-native';
 import AdminNotification from '@/components/AdminNotification';
 import { supabase } from '@/services/supabase-singleton';
 
-// Configure how notifications appear when the app is in the foreground
+// Configure how notifications appear when th app is in the foreground
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -20,19 +20,19 @@ async function persistPushToken(userId: string, token: string) {
     // Fetch current tokens
     const { data: userRow, error: fetchErr } = await supabase
       .from('users')
-      .select('push_tokens')
+      .select('push_token')
       .eq('id', userId)
       .single();
     if (fetchErr) throw fetchErr;
 
-    const existing: string[] = userRow?.push_tokens ?? [];
+    const existing: string[] = userRow?.push_token ?? [];
     if (existing.includes(token)) return; // already saved
 
-    const updatedTokens = [...existing, token];
+    const updatedToken = [...existing, token];
 
     const { error: updateErr } = await supabase
       .from('users')
-      .update({ push_tokens: updatedTokens })
+      .update({ push_token: updatedToken })
       .eq('id', userId);
     if (updateErr) throw updateErr;
   } catch (e) {

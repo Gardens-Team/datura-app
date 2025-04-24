@@ -55,7 +55,7 @@ export default function AdminNotification({
     
     setLoading(true);
     try {
-      await approveMembershipRequest(gardenId, user.id, userId);
+      await approveMembershipRequest(gardenId, userId, user.id);
       setActionTaken(true);
       Alert.alert('Success', `${username} has been approved to join the garden`);
       if (onAction) onAction();
@@ -72,7 +72,7 @@ export default function AdminNotification({
     
     setLoading(true);
     try {
-      await denyMembershipRequest(gardenId, user.id);
+      await denyMembershipRequest(gardenId, userId);
       setActionTaken(true);
       Alert.alert('Success', `${username}'s request has been denied`);
       if (onAction) onAction();

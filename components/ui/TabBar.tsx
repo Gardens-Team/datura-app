@@ -68,7 +68,7 @@ export function TabBar() {
             key={tab.name}
             style={styles.tab}
             onPress={() => {
-              if (tab.path === '/(tabs)/home' || tab.path === '/profile') {
+              if (tab.path === '/(tabs)/home' || '/notifications' || tab.path === '/profile') {
                 router.push(tab.path);
               } else {
                 console.error(`Invalid path: ${tab.path}`);

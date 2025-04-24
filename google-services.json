@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "136922817318",
+    "project_id": "datura-fb",
+    "storage_bucket": "datura-fb.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:136922817318:android:2ccd0c98717981865797e7",
+        "android_client_info": {
+          "package_name": "com.usedatura.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCU0E_ucwyb6iy7YmeDd_ykij2j8yX7wB4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

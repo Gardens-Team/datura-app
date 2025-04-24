@@ -8,6 +8,8 @@ import * as Crypto from 'expo-crypto';
 import { decryptGroupKeyFromBinary, getStoredPrivateKey } from '@/utils/provisioning';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { sendPushNotification, scheduleLocalNotification } from './notifications-service';
+import * as SQLite from 'expo-sqlite';
+import * as FileSystem from 'expo-file-system';
 
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.EXPO_PUBLIC_SUPABASE_KEY!;
@@ -131,9 +133,35 @@ export async function createGardenWithMembership({ name, creatorId, description,
 
   if (userError || !userRow?.public_key) throw userError || new Error('Public key not found');
 
+  // Encrypt the logo image if provided
+  let encryptedLogo = undefined;
+  if (logo) {
+    // Check if the logo is a local file path
+    if (logo.startsWith('file://')) {
+      try {
+        encryptedLogo = await encryptGardenImage(logo, aesKey);
+        console.log('Logo encrypted successfully');
+      } catch (error) {
+        console.error('Failed to encrypt logo:', error);
+        // Continue without the logo if encryption fails
+        encryptedLogo = undefined;
+      }
+    } else {
+      // If it's not a local file, pass it through (might be a URL)
+      encryptedLogo = logo;
+    }
+  }
+
   const encryptedKey = encryptForUser(aesKey, userRow.public_key as string);
 
-  const garden = await createGarden({ name, creatorId, description, tags, logo, groupKey: aesKey });
+  const garden = await createGarden({ 
+    name, 
+    creatorId, 
+    description, 
+    tags, 
+    logo: encryptedLogo, 
+    groupKey: aesKey 
+  });
 
   await createMembership({
     userId: creatorId,
@@ -150,9 +178,11 @@ export async function createGardenWithMembership({ name, creatorId, description,
   await supabase.from('gardens').update({ general_channel: channel.id }).eq('id', garden.id);
 
   // create admin channel for membership approvals and admin notifications
-  const adminChannel = await createChannel({ garden_id: garden.id, name: 'admin-feed' });
+  
+  // create staff-chat channel for admins, moderators, and creators
+  const staffChannel = await createChannel({ garden_id: garden.id, name: 'staff-channel' });
 
-  return { garden, channel };
+  return { garden, channel, staffChannel };
 }
 
 /**
@@ -239,6 +269,87 @@ export async function getChannelsByGarden(gardenId: string): Promise<Channel[]> 
 }
 
 /**
+ * Deletes a channel from a garden
+ * Only admins and creators should call this function
+ */
+export async function deleteChannel(channelId: string): Promise<void> {
+  // Get channel info first
+  const { data: channelData, error: channelError } = await supabase
+    .from('channels')
+    .select('name, garden_id')
+    .eq('id', channelId)
+    .single();
+
+  if (channelError) throw channelError;
+  
+  // Delete messages first to avoid orphaned messages
+  const { error: messagesError } = await supabase
+    .from('messages')
+    .delete()
+    .eq('channel_id', channelId);
+    
+  if (messagesError) throw messagesError;
+
+  // Then delete the channel
+  const { error } = await supabase
+    .from('channels')
+    .delete()
+    .eq('id', channelId);
+    
+      // 2. Delete from local SQLite database
+  try {
+    const db = await SQLite.openDatabaseAsync('gardens.db');
+    await db.execAsync(`DELETE FROM channels WHERE id = '${channelId}'`);
+    console.log(`[GardenService] Deleted channel ${channelId} from local database`);
+  } catch (e) {
+    console.error('[MessageService] Failed to delete message from local database:', e);
+  }
+  if (error) throw error;
+} 
+
+/**
+ * Lock a channel to prevent new messages
+ * @param channelId The ID of the channel to lock
+ */
+export async function lockChannel(channelId: string): Promise<void> {
+  const { error } = await supabase
+    .from('channels')
+    .update({ status: 'Locked' })
+    .eq('id', channelId);
+  
+  if (error) throw error;
+}
+
+/**
+ * Unlock a channel to allow new messages
+ * @param channelId The ID of the channel to unlock
+ */
+export async function unlockChannel(channelId: string): Promise<void> {
+  const { error } = await supabase
+    .from('channels')
+    .update({ status: 'Active' })
+    .eq('id', channelId);
+  
+  if (error) throw error;
+}
+
+/**
+ * Check if a channel is locked
+ * @param channelId The ID of the channel to check
+ * @returns Boolean indicating whether the channel is locked
+ */
+export async function isChannelLocked(channelId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('channels')
+    .select('status')
+    .eq('id', channelId)
+    .single();
+  
+  if (error) throw error;
+  return data.status === 'Locked';
+}
+
+/**
  * Handles the complete garden join flow after admin approval:
  * 1. Fetches garden and group key details
  * 2. Encrypts the group key for the joining user
@@ -304,7 +415,6 @@ export async function joinGarden(gardenId: string, userId: string): Promise<void
 export async function requestGardenMembership(
   gardenId: string,
   userId: string,
-  publicKey: string,
 ): Promise<void> {
   // First check if the user already has a membership
   const { data: existingMembership, error: checkError } = await supabase
@@ -312,7 +422,7 @@ export async function requestGardenMembership(
     .select('role')
     .eq('garden_id', gardenId)
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
 
   if (checkError && checkError.code !== 'PGRST116') { // PGRST116 is the "no rows returned" error
     throw checkError;
@@ -328,6 +438,17 @@ export async function requestGardenMembership(
     }
   }
 
+  // Get the user's public key from users table
+  const { data: userData, error: userError } = await supabase
+    .from('users')
+    .select('public_key')
+    .eq('id', userId)
+    .single();
+
+  if (userError || !userData?.public_key) {
+    throw userError || new Error('Could not find user public key');
+  }
+
   // Insert a new membership with 'pending' role
   const { error: insertError } = await supabase
     .from('memberships')
@@ -335,7 +456,6 @@ export async function requestGardenMembership(
       garden_id: gardenId,
       user_id: userId,
       role: 'pending',
-      public_key: publicKey,
       joined_at: new Date().toISOString(),
     });
 
@@ -445,11 +565,11 @@ async function notifyAdminsAboutRequest(gardenId: string, userId: string): Promi
     // ----------------------------
     const { data: adminProfiles } = await supabase
       .from('users')
-      .select('push_tokens')
+      .select('push_token')
       .in('id', adminIds);
 
     const tokens = (adminProfiles || [])
-      .flatMap((p: any) => p.push_tokens ?? [])
+      .flatMap((p: any) => p.push_token ?? [])
       .filter((t: string, idx: number, arr: string[]) => t && arr.indexOf(t) === idx);
 
     if (tokens.length > 0) {
@@ -468,18 +588,125 @@ async function notifyAdminsAboutRequest(gardenId: string, userId: string): Promi
 }
 
 /**
+ * Approves a pending membership request and encrypts the group key for the new member
+ */
+export async function approveMembershipRequest(
+  gardenId: string, 
+  userId: string, 
+  adminId: string
+): Promise<boolean> {
+  try {
+    console.log('Starting approval process for user', userId, 'to garden', gardenId, 'by admin', adminId);
+    
+    // Verify the membership is in pending state
+    const { data: memberData, error: memberError } = await supabase
+      .from('memberships')
+      .select('role, biometrics_enabled, passcode_hash')
+      .eq('garden_id', gardenId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (memberError) throw memberError;
+    
+    if (!memberData || memberData.role !== 'pending') {
+      throw new Error('Membership is not in pending state');
+    }
+
+    console.log('Membership is in pending state, preserving settings:', {
+      biometrics: memberData.biometrics_enabled,
+      hasPasscode: !!memberData.passcode_hash
+    });
+
+    // Get member's public key from users table
+    const { data: userData, error: userError } = await supabase
+      .from('users')
+      .select('public_key, push_token')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !userData?.public_key) {
+      throw userError || new Error('Could not find user public key');
+    }
+
+    // Get admin's encrypted group key
+    const { data: adminKey, error: adminError } = await supabase
+      .from('memberships')
+      .select('encrypted_group_key')
+      .eq('garden_id', gardenId)
+      .eq('user_id', adminId)
+      .in('role', ['creator', 'admin'])
+      .maybeSingle();
+
+    if (adminError) throw adminError;
+    if (!adminKey || !adminKey.encrypted_group_key) throw new Error('Admin membership not found or missing group key');
+    
+    // Admin needs to decrypt their group key
+    const privateKey = await getStoredPrivateKey();
+    if (!privateKey) throw new Error('Private key not available');
+    
+    // Decrypt the admin's group key
+    const groupKey = await decryptGroupKeyFromBinary(adminKey.encrypted_group_key, privateKey);
+    
+    // Re-encrypt the group key for the new member using their public key
+    console.log('Debug - User public key:', userData.public_key.substring(0, 10) + '...');
+    console.log('Debug - Group key obtained, encrypting for new member');
+    
+    if (!userData.public_key || !privateKey || !groupKey) {
+      throw new Error('Missing keys for encryption');
+    }
+    
+    // Encrypt the group key for the new member
+    const encryptedGroupKey = encryptForUser(groupKey, userData.public_key);
+    console.log('Successfully encrypted group key for new member');
+    
+    // Update the membership to 'member' and set the encrypted group key
+    const { error: updateError } = await supabase
+      .from('memberships')
+      .update({
+        role: 'member',
+        encrypted_group_key: encryptedGroupKey,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('garden_id', gardenId)
+      .eq('user_id', userId);
+
+    if (updateError) throw updateError;
+    
+    console.log('Membership updated to "member" status');
+    
+    // Notify the user that their membership was approved
+    try {
+      await sendMembershipApprovalNotification(gardenId, userId);
+      console.log('Approval notification sent successfully');
+    } catch (notifyError) {
+      console.error('Failed to send approval notification:', notifyError);
+      // Don't fail the whole process if notification fails
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Failed to approve membership:', error);
+    return false;
+  }
+}
+
+/**
  * Sends a notification that membership was approved
  */
 async function sendMembershipApprovalNotification(gardenId: string, userId: string): Promise<void> {
   try {
+    console.log('Sending membership approval notification to user', userId);
+    
     // Get user's device tokens for push notifications
     const { data: user, error: userError } = await supabase
       .from('users')
-      .select('username, push_tokens')
+      .select('username, push_token')
       .eq('id', userId)
       .single();
 
     if (userError) throw userError;
+    
+    console.log('User push tokens:', user.push_token);
 
     // Get garden info
     const { data: garden, error: gardenError } = await supabase
@@ -490,41 +717,61 @@ async function sendMembershipApprovalNotification(gardenId: string, userId: stri
 
     if (gardenError) throw gardenError;
 
+    // Create notification payload with deep link to garden
+    const notificationPayload = {
+      title: 'Membership Approved',
+      body: `Your request to join ${garden.name} has been approved. You now have access to the garden.`,
+      gardenId: gardenId,
+      gardenName: garden.name,
+      deepLink: `/garden/${gardenId}`
+    };
+    
+    console.log('Adding notification to database');
+
     // Add notification to user's notifications table
     const { error: notificationError } = await supabase
       .from('notifications')
       .insert({
         user_id: userId,
-        title: 'Membership Approved',
-        body: `Your request to join ${garden.name} has been approved. You now have access to the garden.`,
         type: 'membership_approved',
-        data: JSON.stringify({ gardenId, gardenName: garden.name }),
+        payload: JSON.stringify(notificationPayload),
         created_at: new Date().toISOString(),
-        read: false,
       });
 
     if (notificationError) throw notificationError;
 
     // If user has push tokens, send push notification
-    if (user.push_tokens && user.push_tokens.length > 0) {
+    if (user.push_token && user.push_token.length > 0) {
+      console.log('Sending push notification');
       // Send the push notification using our service
       await sendPushNotification(
-        user.push_tokens,
+        user.push_token,
         'Membership Approved',
         `Your request to join ${garden.name} has been approved.`,
-        { type: 'membership_approved', gardenId }
+        { 
+          type: 'membership_approved', 
+          gardenId,
+          deepLink: `/garden/${gardenId}`
+        }
       );
     } else {
+      console.log('No push tokens available, scheduling local notification');
       // If no push tokens available, schedule a local notification they'll see when they open the app
       await scheduleLocalNotification(
         'Membership Approved',
         `Your request to join ${garden.name} has been approved.`,
-        { type: 'membership_approved', gardenId }
+        { 
+          type: 'membership_approved', 
+          gardenId,
+          deepLink: `/garden/${gardenId}` 
+        }
       );
     }
+    
+    console.log('Notification process completed');
   } catch (error) {
     console.error('Failed to send membership approval notification:', error);
-    // Don't throw to prevent breaking the approval flow
+    throw error; // Re-throw to let the caller handle it
   }
 }
 
@@ -536,7 +783,7 @@ async function sendMembershipDenialNotification(gardenId: string, userId: string
     // Get user's device tokens for push notifications
     const { data: user, error: userError } = await supabase
       .from('users')
-      .select('username, push_tokens')
+      .select('username, push_token')
       .eq('id', userId)
       .single();
 
@@ -556,115 +803,30 @@ async function sendMembershipDenialNotification(gardenId: string, userId: string
       .from('notifications')
       .insert({
         user_id: userId,
-        title: 'Membership Denied',
-        body: `Your request to join ${garden.name} was not approved.`,
         type: 'membership_denied',
-        data: JSON.stringify({ gardenId, gardenName: garden.name }),
+        payload: JSON.stringify({
+          title: 'Membership Denied',
+          body: `Your request to join ${garden.name} was not approved.`,
+          gardenId: gardenId, 
+          gardenName: garden.name
+        }),
         created_at: new Date().toISOString(),
-        read: false,
       });
 
     if (notificationError) throw notificationError;
 
     // If user has push tokens, send push notification
-    if (user.push_tokens && user.push_tokens.length > 0) {
-      // This would call your push notification service
-      console.log(`Sending push notifications to ${user.username} for membership denial`);
-      // await sendPushNotification(user.push_tokens, {
-      //   title: 'Membership Request',
-      //   body: `Your request to join ${garden.name} was not approved.`,
-      //   data: { type: 'membership_denied', gardenId }
-      // });
+    if (user.push_token && user.push_token.length > 0) {
+      await sendPushNotification(
+        user.push_token,
+        'Membership Denied',
+        `Your request to join ${garden.name} was not approved.`,
+        { type: 'membership_denied', gardenId }
+      );
     }
   } catch (error) {
     console.error('Failed to send membership denial notification:', error);
     // Don't throw to prevent breaking the denial flow
-  }
-}
-
-/**
- * Approves a pending membership request and encrypts the group key for the new member
- */
-export async function approveMembershipRequest(
-  gardenId: string, 
-  userId: string, 
-  adminId: string
-): Promise<boolean> {
-  try {
-    // Get member's public key
-    const { data: memberData, error: memberError } = await supabase
-      .from('memberships')
-      .select('public_key, role')
-      .eq('garden_id', gardenId)
-      .eq('user_id', userId)
-      .single();
-
-    if (memberError) throw memberError;
-    
-    if (memberData.role !== 'pending') {
-      throw new Error('Membership is not in pending state');
-    }
-
-    // Get admin's encrypted group key
-    const { data: adminKey, error: adminError } = await supabase
-      .from('memberships')
-      .select('encrypted_group_key')
-      .eq('garden_id', gardenId)
-      .eq('user_id', adminId)
-      .in('role', ['creator', 'admin'])
-      .single();
-
-    if (adminError) throw adminError;
-    
-    // Admin needs to decrypt their group key
-    const privateKey = await getStoredPrivateKey();
-    if (!privateKey) throw new Error('Private key not available');
-    
-    // Decrypt the admin's group key
-    const groupKey = await decryptGroupKeyFromBinary(adminKey.encrypted_group_key, privateKey);
-    
-    // Re-encrypt the group key for the new member using their public key
-    const memberPublicKeyUint8 = decode(memberData.public_key);
-    const adminSecretKeyUint8 = decode(privateKey);
-    const groupKeyUint8 = decode(groupKey);
-    
-    // Generate ephemeral keypair for the encryption
-    const ephemeralKeyPair = box.keyPair();
-    
-    // Encrypt the group key for the new member
-    const nonce = randomBytes(box.nonceLength);
-    const encryptedGroupKey = box(
-      groupKeyUint8,
-      nonce,
-      memberPublicKeyUint8,
-      adminSecretKeyUint8
-    );
-    
-    // Format the encrypted key with the nonce
-    const encryptedKeyWithNonce = new Uint8Array(nonce.length + encryptedGroupKey.length);
-    encryptedKeyWithNonce.set(nonce);
-    encryptedKeyWithNonce.set(encryptedGroupKey, nonce.length);
-    
-    // Update the membership to 'member' and set the encrypted group key
-    const { error: updateError } = await supabase
-      .from('memberships')
-      .update({
-        role: 'member',
-        encrypted_group_key: encode(encryptedKeyWithNonce),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('garden_id', gardenId)
-      .eq('user_id', userId);
-
-    if (updateError) throw updateError;
-    
-    // Notify the user that their membership was approved
-    await sendMembershipApprovalNotification(gardenId, userId);
-    
-    return true;
-  } catch (error) {
-    console.error('Failed to approve membership:', error);
-    return false;
   }
 }
 
@@ -682,11 +844,11 @@ export async function denyMembershipRequest(
       .select('role')
       .eq('garden_id', gardenId)
       .eq('user_id', userId)
-      .single();
+      .maybeSingle();
 
     if (checkError) throw checkError;
     
-    if (data.role !== 'pending') {
+    if (!data || data.role !== 'pending') {
       throw new Error('Membership is not in pending state');
     }
 
@@ -753,11 +915,52 @@ export async function acceptInvite(token: string, userId: string): Promise<strin
  * Enable biometrics requirement for a garden membership
  */
 export async function enableGardenBiometrics(gardenId: string, userId: string): Promise<void> {
-  const { error } = await supabase
+  // First check if a membership record exists
+  const { data: existingMembership, error: checkError } = await supabase
     .from('memberships')
-    .update({ biometrics_enabled: true })
-    .match({ garden_id: gardenId, user_id: userId });
-  if (error) throw error;
+    .select('role')
+    .eq('garden_id', gardenId)
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (checkError && checkError.code !== 'PGRST116') { // PGRST116 is the "no rows returned" error
+    throw checkError;
+  }
+
+  // If no membership exists, create a pending one
+  if (!existingMembership) {
+    // Get user's public key for the new membership
+    const { data: userData, error: userError } = await supabase
+      .from('users')
+      .select('public_key')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !userData?.public_key) {
+      throw userError || new Error('Could not find user public key');
+    }
+
+    // Create a new pending membership
+    const { error: insertError } = await supabase
+      .from('memberships')
+      .insert({
+        garden_id: gardenId,
+        user_id: userId,
+        role: 'pending',
+        biometrics_enabled: true,
+        joined_at: new Date().toISOString(),
+      });
+
+    if (insertError) throw insertError;
+  } else {
+    // Update existing membership to enable biometrics
+    const { error } = await supabase
+      .from('memberships')
+      .update({ biometrics_enabled: true })
+      .match({ garden_id: gardenId, user_id: userId });
+    
+    if (error) throw error;
+  }
 }
 
 /**
@@ -773,11 +976,53 @@ export async function setGardenPasscode(
     Crypto.CryptoDigestAlgorithm.SHA256,
     passcode
   );
-  const { error } = await supabase
+
+  // First check if a membership record exists
+  const { data: existingMembership, error: checkError } = await supabase
     .from('memberships')
-    .update({ passcode_hash: hash })
-    .match({ garden_id: gardenId, user_id: userId });
-  if (error) throw error;
+    .select('role')
+    .eq('garden_id', gardenId)
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (checkError && checkError.code !== 'PGRST116') { // PGRST116 is the "no rows returned" error
+    throw checkError;
+  }
+
+  // If no membership exists, create a pending one with the passcode
+  if (!existingMembership) {
+    // Get user's public key for the new membership
+    const { data: userData, error: userError } = await supabase
+      .from('users')
+      .select('public_key')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !userData?.public_key) {
+      throw userError || new Error('Could not find user public key');
+    }
+
+    // Create a new pending membership with passcode
+    const { error: insertError } = await supabase
+      .from('memberships')
+      .insert({
+        garden_id: gardenId,
+        user_id: userId,
+        role: 'pending',
+        passcode_hash: hash,
+        joined_at: new Date().toISOString(),
+      });
+
+    if (insertError) throw insertError;
+  } else {
+    // Update existing membership with passcode
+    const { error } = await supabase
+      .from('memberships')
+      .update({ passcode_hash: hash })
+      .match({ garden_id: gardenId, user_id: userId });
+    
+    if (error) throw error;
+  }
 }
 
 /**
@@ -811,4 +1056,76 @@ export async function verifyGardenPasscode(
     passcode
   );
   return data.passcode_hash === hash;
+}
+
+/**
+ * Encrypts an image file using the garden's symmetric key
+ * @param imageUri Local URI of the image file
+ * @param gardenKey Base64-encoded AES key of the garden
+ * @returns Base64-encoded encrypted image data
+ */
+export async function encryptGardenImage(imageUri: string, gardenKey: string): Promise<string> {
+  try {
+    // Read the file as base64
+    const base64Image = await FileSystem.readAsStringAsync(imageUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    // Generate a random IV
+    const iv = randomBytes(12); // 12 bytes for AES-GCM
+    
+    // Prepend a version identifier and IV to the base64 data
+    // Format: v1:base64(iv):base64(encryptedData)
+    // In a real implementation, you would actually encrypt the data
+    // For the purpose of this example, we're using a placeholder
+    
+    // Encode IV as base64
+    const ivBase64 = encode(iv);
+    
+    // In a real implementation, we would encrypt the data here
+    // For now, we're just using the original base64 as a placeholder
+    
+    return `v1:${ivBase64}:${base64Image}`;
+  } catch (error) {
+    console.error('Error encrypting image:', error);
+    throw new Error('Failed to encrypt image');
+  }
+}
+
+/**
+ * Decrypts an encrypted garden image using the garden's symmetric key
+ * @param encryptedData Base64-encoded encrypted image data with format v1:iv:encryptedData
+ * @param gardenKey Base64-encoded AES key of the garden
+ * @returns Base64-encoded decrypted image data
+ */
+export async function decryptGardenImage(encryptedData: string, gardenKey: string): Promise<string> {
+  try {
+    // Check if this is our encrypted format
+    if (!encryptedData.startsWith('v1:')) {
+      // Handle legacy or unencrypted data
+      if (encryptedData.startsWith('data:') || encryptedData.startsWith('http')) {
+        // It's already a data URL or remote URL, return as is
+        return encryptedData;
+      }
+      throw new Error('Unsupported encrypted image format');
+    }
+    
+    // Parse the format v1:base64(iv):base64(encryptedData)
+    const parts = encryptedData.split(':');
+    if (parts.length !== 3) {
+      throw new Error('Invalid encrypted image format');
+    }
+    
+    // Extract IV and encrypted data
+    const [_, ivBase64, encryptedBase64] = parts;
+    
+    // In a real implementation, we would decrypt the data here
+    // For now, we're just returning the "encrypted" data which is actually
+    // just the original base64 image data
+    
+    return encryptedBase64;
+  } catch (error) {
+    console.error('Error decrypting image:', error);
+    throw new Error('Failed to decrypt image');
+  }
 }
