@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, Dimensions, Alert, Animated, Easing } from 'react-native';
+import { View, Text, StyleSheet, Dimensions, Alert, Animated, Easing, TouchableOpacity, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '@/constants/Colors';
@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/Button';
 
 const PASSCODE_KEY = 'user_passcode';
 const FINGERPRINT_SIZE = 120;
+const DIALPAD_BUTTON_SIZE = 72;
 
 export default function AuthScreen() {
   const insets = useSafeAreaInsets();
@@ -182,42 +183,92 @@ export default function AuthScreen() {
       ['1', '2', '3'],
       ['4', '5', '6'],
       ['7', '8', '9'],
-      ['cancel', '0', '⌫']
+      ['', '0', 'backspace']
     ];
 
     return (
       <View style={styles.dialpad}>
         {numbers.map((row, rowIndex) => (
-          <View key={rowIndex} style={styles.dialpadRow}>
-            {row.map((num, colIndex) => {
-              const isSpecialButton = num === 'cancel' || num === '⌫';
+          <View key={`row-${rowIndex}`} style={styles.dialpadRow}>
+            {row.map((item, colIndex) => {
+              if (item === '') {
+                return <View key={`empty-${rowIndex}-${colIndex}`} style={styles.emptyButton} />;
+              }
+              
+              const isBackspace = item === 'backspace';
+              
               return (
-                <Button
-                  key={`${rowIndex}-${colIndex}`}
-                  variant={isSpecialButton ? 'secondary' : 'default'}
-                  size="lg"
-                  style={[
+                <Pressable
+                  key={`button-${rowIndex}-${colIndex}`}
+                  style={({ pressed }) => [
                     styles.dialpadButton,
-                    isSpecialButton && { backgroundColor: colors.border }
+                    { 
+                      backgroundColor: pressed 
+                        ? (colorScheme === 'dark' ? '#3a3a3c' : '#d1d1d6') 
+                        : (colorScheme === 'dark' ? '#2c2c2e' : '#e5e5ea')
+                    }
                   ]}
                   disabled={isLoading}
                   onPress={() => {
-                    if (num === '⌫') {
+                    if (isBackspace) {
                       handleBackspace();
-                    } else if (num === 'cancel') {
-                      setShowPasscode(false);
-                      setPasscode('');
                     } else {
-                      handlePasscodeInput(num);
+                      handlePasscodeInput(item);
                     }
                   }}
                 >
-                  {num === 'cancel' ? 'Back to Fingerprint' : num}
-                </Button>
+                  {isBackspace ? (
+                    <Ionicons name="backspace-outline" size={24} color={colors.text} />
+                  ) : (
+                    <Text style={[styles.dialpadButtonText, { color: colors.text }]}>
+                      {item}
+                    </Text>
+                  )}
+                  
+                  {/* Only show subtitles for some numbers, like on iOS */}
+                  {item === '2' && (
+                    <Text style={styles.dialpadSubtitle}>ABC</Text>
+                  )}
+                  {item === '3' && (
+                    <Text style={styles.dialpadSubtitle}>DEF</Text>
+                  )}
+                  {item === '4' && (
+                    <Text style={styles.dialpadSubtitle}>GHI</Text>
+                  )}
+                  {item === '5' && (
+                    <Text style={styles.dialpadSubtitle}>JKL</Text>
+                  )}
+                  {item === '6' && (
+                    <Text style={styles.dialpadSubtitle}>MNO</Text>
+                  )}
+                  {item === '7' && (
+                    <Text style={styles.dialpadSubtitle}>PQRS</Text>
+                  )}
+                  {item === '8' && (
+                    <Text style={styles.dialpadSubtitle}>TUV</Text>
+                  )}
+                  {item === '9' && (
+                    <Text style={styles.dialpadSubtitle}>WXYZ</Text>
+                  )}
+                </Pressable>
               );
             })}
           </View>
         ))}
+        
+        {/* Separate row for cancel/back button */}
+        <View style={styles.cancelButtonContainer}>
+          <Button
+            variant="ghost"
+            onPress={() => {
+              setShowPasscode(false);
+              setPasscode('');
+            }}
+            disabled={isLoading}
+          >
+            {hasPasscode && isBiometricSupported ? 'Use Fingerprint Instead' : 'Cancel'}
+          </Button>
+        </View>
       </View>
     );
   };
@@ -236,7 +287,7 @@ export default function AuthScreen() {
         {showPasscode ? (
           <View style={styles.passcodeContainer}>
             <Text style={[styles.passcodeTitle, { color: colors.text }]}>
-              Enter 6-digit Passcode
+              Enter Passcode
             </Text>
             <View style={styles.dotsContainer}>
               {[...Array(6)].map((_, i) => (
@@ -357,38 +408,68 @@ const styles = StyleSheet.create({
   passcodeContainer: {
     width: '100%',
     alignItems: 'center',
-    gap: 24,
+    marginTop: 12,
   },
   passcodeTitle: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '600',
+    marginBottom: 20,
   },
   dotsContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 12,
+    gap: 16,
+    marginBottom: 40,
   },
   dot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 1,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1.5,
   },
   dialpad: {
     width: '100%',
-    maxWidth: 300,
-    aspectRatio: 4/5,
-    gap: 12,
+    maxWidth: 280,
+    alignItems: 'center',
+    marginTop: 20,
   },
   dialpadRow: {
-    flex: 1,
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 12,
+    justifyContent: 'center',
+    marginBottom: 16,
+    width: '100%',
   },
   dialpadButton: {
-    flex: 1,
-    height: 64,
-    borderRadius: 12,
+    width: DIALPAD_BUTTON_SIZE,
+    height: DIALPAD_BUTTON_SIZE,
+    borderRadius: DIALPAD_BUTTON_SIZE / 2,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 1,
+    elevation: 1,
+  },
+  emptyButton: {
+    width: DIALPAD_BUTTON_SIZE,
+    height: DIALPAD_BUTTON_SIZE,
+    marginHorizontal: 12,
+  },
+  dialpadButtonText: {
+    fontSize: 30,
+    fontWeight: '400',
+  },
+  dialpadSubtitle: {
+    fontSize: 10,
+    color: '#8e8e93',
+    marginTop: 2,
+    letterSpacing: 1,
+  },
+  cancelButtonContainer: {
+    marginTop: 24,
+    width: '100%',
+    alignItems: 'center',
   },
 });

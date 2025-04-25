@@ -33,7 +33,8 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true
@@ -46,6 +47,11 @@
         "projectId": "6ed15bf5-0a6b-478d-b29f-29489ffaaa6f"
       }
     },
+    "fonts": [
+      {
+        "asset": "./assets/fonts/Inter-VariableFont_opsz,wght.ttf"
+      }
+    ],
     "owner": "comradecrashout"
   }
 }

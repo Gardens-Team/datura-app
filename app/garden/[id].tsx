@@ -590,7 +590,7 @@ export default function GardenScreen() {
                     style={styles.menuItem}
                     onPress={() => {
                       setMenuVisible(false);
-                      Alert.alert('Info', 'Garden settings coming soon!');
+                      router.push(`/settings/${id}` as const);
                     }}
                   >
                     <Ionicons name="settings-outline" size={20} color={colors.primary} style={styles.menuIcon}/>

@@ -34,6 +34,7 @@ export default function TabLayout() {
   const translateX = useRef(new Animated.Value(0)).current;
   const pathname = usePathname();
   const isNotificationsScreen = pathname.includes('/notifications');
+  const isSettingsScreen = pathname.includes('/settings');
   const [showCreate, setShowCreate] = useState(false);
   const router = useRouter();
   const { user } = useCurrentUser();
@@ -43,9 +44,9 @@ export default function TabLayout() {
   // Determine if we're on the profile screen
   const isProfileScreen = pathname.includes('/profile');
   
-  // Hide panel when on profile screen
+  // Hide panel when on profile, notifications, or settings screen
   useEffect(() => {
-    if (isProfileScreen && isOpen) {
+    if ((isProfileScreen || isNotificationsScreen || isSettingsScreen) && isOpen) {
       Animated.spring(translateX, {
         toValue: -PANEL_WIDTH,
         useNativeDriver: true,
@@ -53,13 +54,11 @@ export default function TabLayout() {
       }).start();
       setIsOpen(false);
     }
-  }, [isProfileScreen, isOpen, translateX]);
+  }, [isOpen, translateX, isProfileScreen, isNotificationsScreen, isSettingsScreen]);
 
   const togglePanel = useCallback(() => {
     // Don't allow panel opening on profile screen
-    if (isProfileScreen) return;
-    // Or notifications screen
-    if (isNotificationsScreen) return;
+    if (isProfileScreen || isNotificationsScreen || isSettingsScreen) return;
     
     const toValue = isOpen ? -PANEL_WIDTH : 0;
     Animated.spring(translateX, {
@@ -68,7 +67,7 @@ export default function TabLayout() {
       ...SPRING_CONFIG,
     }).start();
     setIsOpen(!isOpen);
-  }, [isOpen, translateX, isProfileScreen, isNotificationsScreen]);
+  }, [isOpen, translateX, isProfileScreen, isNotificationsScreen, isSettingsScreen]);
 
   // Decrypt garden logos
   const decryptGardenLogos = useCallback(async (gardensToDecrypt: Garden[]) => {
@@ -138,9 +137,9 @@ export default function TabLayout() {
           style={[
             styles.content,
             {
-              transform: [{ translateX: isProfileScreen || isNotificationsScreen ? new Animated.Value(0) : translateX }],
+              transform: [{ translateX: (isProfileScreen || isNotificationsScreen || isSettingsScreen) ? new Animated.Value(0) : translateX }],
               paddingBottom: 49 + insets.bottom,
-              marginLeft: isProfileScreen || isNotificationsScreen ? 0 : undefined,
+              marginLeft: (isProfileScreen || isNotificationsScreen || isSettingsScreen) ? 0 : undefined,
             }
           ]}
         >
@@ -187,7 +186,7 @@ export default function TabLayout() {
         </Animated.View>
 
         {/* Left Panel - Server List */}
-        {!isProfileScreen && !isNotificationsScreen && (
+        {!isProfileScreen && !isNotificationsScreen && !isSettingsScreen && (
           <Animated.View 
             style={[
               styles.serverPanel, 

@@ -10,38 +10,39 @@ interface GardenAuthProviderProps {
   children: React.ReactNode;
 }
 
+// Define the duration in milliseconds (e.g., 15 minutes)
+const GARDEN_AUTH_VALIDITY_DURATION_MS = 15 * 60 * 1000; // 900000
+
 export function GardenAuthProvider({ gardenId, children }: GardenAuthProviderProps) {
   const { user } = useCurrentUser();
   const [authorized, setAuthorized] = useState(false);
 
   useEffect(() => {
     async function checkAuth() {
-      // Auto-authorize creators who haven't set up auth yet
-      if (user) {
-        const { data: mem, error: memErr } = await supabase
-          .from('memberships')
-          .select('role')
-          .match({ garden_id: gardenId, user_id: user.id })
-          .single();
-        // creators bypass auth entirely
-        if (!memErr && mem?.role === 'creator') {
-          setAuthorized(true);
-          return;
-        }
-      }
-
-      // existing SecureStore timestamp logic
+      // Check SecureStore for a recent authorization timestamp
       const item = await SecureStore.getItemAsync(`garden_auth_${gardenId}`);
       if (item) {
         const { timestamp } = JSON.parse(item);
-        if (Date.now() - timestamp < 3600000) {
+        // Use the constant here
+        if (Date.now() - timestamp < GARDEN_AUTH_VALIDITY_DURATION_MS) {
           setAuthorized(true);
-          return;
+          return; // Authorized based on recent timestamp
         }
       }
+      
+      // If no recent timestamp, user is not authorized yet.
+      // The GardenAuthModal will be displayed.
       setAuthorized(false);
     }
-    checkAuth();
+    
+    if (user) { // Only run check if user is loaded
+      checkAuth();
+    } else {
+      // If user is not loaded, we can assume not authorized for the garden yet.
+      // This prevents potential flashes of content before user data is available.
+      setAuthorized(false);
+    }
+
   }, [gardenId, user]);
 
   const handleSuccess = async () => {
@@ -56,16 +57,23 @@ export function GardenAuthProvider({ gardenId, children }: GardenAuthProviderPro
     router.replace('/');
   };
 
+  if (!user) {
+    // Optionally show a loading indicator while user is loading
+    // Or simply return null/empty view
+    return null; 
+  }
+
   if (!authorized) {
     return (
       <GardenAuthModal
         visible={!authorized}
         gardenId={gardenId}
-        gardenName=""
+        gardenName="" // TODO: Fetch and pass actual garden name
         onSuccess={handleSuccess}
         onCancel={handleCancel}
       />
     );
   }
+  
   return <>{children}</>;
 } 

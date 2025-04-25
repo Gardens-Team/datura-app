@@ -10,6 +10,7 @@ import {
   Image,
   Pressable,
   Alert,
+  ScrollView,
 } from 'react-native';
 import { useColorScheme } from 'react-native';
 import { Colors } from '@/constants/Colors';
@@ -47,7 +48,7 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
   const [logo, setLogo] = useState<string | null>(null);
   const { user } = useCurrentUser();
   const [passcode, setPasscode] = useState('');
-  const [enableBiometrics, setEnableBiometrics] = useState(false);
+  const [selectedAuthMethod, setSelectedAuthMethod] = useState<'biometrics' | 'passcode' | null>(null);
   const [hasBiometricHardware, setHasBiometricHardware] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -95,13 +96,15 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
     try {
       setLoading(true);
       
-      // 1. Create the garden with the logo
+      // Pass the selected auth method and passcode to the service function
       const result = await createGardenWithMembership({
         name,
         creatorId,
         description,
         tags,
         logo: logo || undefined,
+        authMethod: selectedAuthMethod, // Pass selected method
+        passcode: selectedAuthMethod === 'passcode' ? passcode : undefined, // Pass passcode only if selected
       });
       
       const gardenId = result.garden.id;
@@ -179,11 +182,18 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
     );
   };
 
+  const isSecurityStepComplete = () => {
+    if (!selectedAuthMethod) return false;
+    if (selectedAuthMethod === 'biometrics') return true;
+    if (selectedAuthMethod === 'passcode') return passcode.length === 6;
+    return false;
+  };
+
   const steps = [
     {
       title: 'Details',
       component: (
-        <View>
+        <View style={styles.stepContainer}>
           <Text style={[styles.label, { color: colors.text }]}>Garden Name</Text>
           <TextInput
             placeholder="My Awesome Garden"
@@ -220,7 +230,7 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
     {
       title: 'Customize',
       component: (
-        <View style={styles.subscriptionContainer}>
+        <View style={styles.stepContainer}>
           {/* Logo */}
           <Text style={[styles.label, { color: colors.text }]}>Logo</Text>
           <TouchableOpacity style={[styles.logoPicker, { borderColor: colors.border }]} onPress={pickImage}>
@@ -268,112 +278,102 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
       ),
     },
     {
-      title: 'Biometrics',
+      title: 'Security',
       component: (
-        <View style={styles.securityContainer}>
-          <View style={styles.biometricsContent}>
-            <Ionicons 
-              name="finger-print" 
-              size={120} 
-              color={colors.primary}
-              style={styles.biometricIcon}
-            />
-            
-            <Text style={[styles.securityTitle, { color: colors.text }]}>
-              Enable Biometric Access
-            </Text>
-            
-            <Text style={[styles.securityDescription, { color: colors.secondaryText }]}>
-              {hasBiometricHardware 
-                ? "Use your fingerprint or face recognition for quick access to your garden"
-                : "Your device doesn't support biometric authentication"}
-            </Text>
-            
+        <ScrollView 
+          style={styles.stepContainer} 
+          contentContainerStyle={styles.scrollContentContainer}
+          keyboardShouldPersistTaps="handled" // Allow taps outside TextInput
+        >
+          <Text style={[styles.securityTitle, { color: colors.text }]}>
+            Secure Your Garden
+          </Text>
+          <Text style={[styles.securityDescription, { color: colors.secondaryText, marginBottom: 30 }]}>
+            Choose how you want to protect access. This is required.
+          </Text>
+
+          <View style={styles.authSelectionContainer}>
+            {/* Biometrics Card */}
             <TouchableOpacity
               style={[
-                styles.primaryButton, 
-                { 
-                  backgroundColor: hasBiometricHardware ? colors.primary : colors.border,
-                  marginTop: 40
-                }
+                styles.authCard,
+                { borderColor: selectedAuthMethod === 'biometrics' ? colors.primary : colors.border },
+                !hasBiometricHardware && { opacity: 0.5, backgroundColor: colors.border },
               ]}
-              onPress={() => {
-                setEnableBiometrics(true);
-                setCurrentStep(3);
-              }}
+              onPress={() => hasBiometricHardware && setSelectedAuthMethod('biometrics')}
               disabled={!hasBiometricHardware}
             >
-              <Text style={[styles.buttonText, { color: hasBiometricHardware ? colors.accent : colors.secondaryText }]}>
-                Enable Biometrics
+              <Ionicons name="finger-print" size={40} color={selectedAuthMethod === 'biometrics' ? colors.primary : colors.text} />
+              <Text style={[styles.authCardTitle, { color: selectedAuthMethod === 'biometrics' ? colors.primary : colors.text }]}>
+                Biometrics
+              </Text>
+              <Text style={[styles.authCardDescription, { color: colors.secondaryText }]}>
+                Fingerprint or Face ID
               </Text>
             </TouchableOpacity>
-            
-            <TouchableOpacity
-              style={[styles.secondaryButton, { borderColor: colors.primary }]}
-              onPress={() => {
-                setEnableBiometrics(false);
-                setCurrentStep(3);
-              }}
-            >
-              <Text style={[styles.secondaryButtonText, { color: colors.primary }]}>
-                {hasBiometricHardware ? "Skip This Step" : "Continue"}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      ),
-    },
-    {
-      title: 'Passcode',
-      component: (
-        <View style={styles.securityContainer}>
-          <View style={styles.passcodeContent}>
-            <Text style={[styles.securityTitle, { color: colors.text }]}>
-              Create Passcode
-            </Text>
-            
-            <Text style={[styles.securityDescription, { color: colors.secondaryText }]}>
-              Set a 6-digit passcode to protect access to your garden
-            </Text>
-            
-            <PasscodeDigits />
-            <PasscodeKeypad />
-            
+
+            {/* Passcode Card */}
             <TouchableOpacity
               style={[
-                styles.primaryButton, 
-                { 
-                  backgroundColor: colors.primary,
-                  opacity: passcode.length === 6 ? 1 : 0.5
-                }
+                styles.authCard,
+                { borderColor: selectedAuthMethod === 'passcode' ? colors.primary : colors.border }
               ]}
-              onPress={() => setCurrentStep(4)}
-              disabled={passcode.length !== 6}
+              onPress={() => setSelectedAuthMethod('passcode')}
             >
-              <Text style={[styles.buttonText, { color: colors.accent }]}>
-                Set Passcode
+              <Ionicons name="keypad" size={40} color={selectedAuthMethod === 'passcode' ? colors.primary : colors.text} />
+              <Text style={[styles.authCardTitle, { color: selectedAuthMethod === 'passcode' ? colors.primary : colors.text }]}>
+                Passcode
               </Text>
-            </TouchableOpacity>
-            
-            <TouchableOpacity
-              style={[styles.secondaryButton, { borderColor: colors.primary }]}
-              onPress={() => {
-                setPasscode('');
-                setCurrentStep(4);
-              }}
-            >
-              <Text style={[styles.secondaryButtonText, { color: colors.primary }]}>
-                Skip Passcode
+              <Text style={[styles.authCardDescription, { color: colors.secondaryText }]}>
+                6-digit code
               </Text>
             </TouchableOpacity>
           </View>
-        </View>
+
+          {/* Conditional Passcode Setup */}
+          {selectedAuthMethod === 'passcode' && (
+            <View style={styles.passcodeSetupContainer}>
+              <Text style={[styles.label, { color: colors.text, textAlign: 'center' }]}>Enter a 6-digit passcode</Text>
+              <PasscodeDigits />
+              <PasscodeKeypad />
+            </View>
+          )}
+
+          {selectedAuthMethod === 'biometrics' && hasBiometricHardware && (
+             <Text style={[styles.confirmationText, { color: colors.primary }]}>
+              Biometric authentication enabled. Your device will prompt you when needed.
+            </Text>
+          )}
+           {!hasBiometricHardware && selectedAuthMethod === 'biometrics' && (
+             <Text style={[styles.confirmationText, { color: colors.error }]}>
+               Biometrics not available on this device. Please choose Passcode.
+            </Text>
+          )}
+
+
+          <TouchableOpacity
+            style={[
+              styles.primaryButton,
+              { backgroundColor: colors.primary },
+              !isSecurityStepComplete() && { opacity: 0.5 }
+            ]}
+            onPress={() => setCurrentStep(3)}
+            disabled={!isSecurityStepComplete()}
+          >
+            <Text style={[styles.buttonText, { color: colors.accent }]}>Next</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.backButton} onPress={() => setCurrentStep(1)}>
+            <Ionicons name="arrow-back" size={20} color={colors.primary} />
+            <Text style={[styles.backText, { color: colors.primary }]}>Back</Text>
+          </TouchableOpacity>
+        </ScrollView>
       ),
     },
     {
       title: 'Finish',
       component: (
-        <View style={styles.subscriptionContainer}>
+        <View style={styles.stepContainer}>
           <Ionicons 
             name="checkmark-circle" 
             size={100} 
@@ -386,10 +386,9 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
           </Text>
           
           <Text style={[styles.securityDescription, { color: colors.secondaryText, textAlign: 'center', marginBottom: 40 }]}>
-            Your garden will be created with the following security settings:
-            {enableBiometrics ? "\n• Biometric authentication enabled" : ""}
-            {passcode.length === 6 ? "\n• Passcode protection enabled" : ""}
-            {!enableBiometrics && passcode.length !== 6 ? "\n• No security features enabled" : ""}
+            Your garden will be created with the following security:
+            {selectedAuthMethod === 'biometrics' ? "\n• Biometric authentication" : ""}
+            {selectedAuthMethod === 'passcode' ? "\n• Passcode protection" : ""}
           </Text>
           
           <TouchableOpacity
@@ -402,6 +401,11 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
             ) : (
               <Text style={[styles.buttonText, { color: colors.accent }]}>Create Garden</Text>
             )}
+          </TouchableOpacity>
+
+           <TouchableOpacity style={styles.backButton} onPress={() => setCurrentStep(2)}>
+            <Ionicons name="arrow-back" size={20} color={colors.primary} />
+            <Text style={[styles.backText, { color: colors.primary }]}>Back</Text>
           </TouchableOpacity>
         </View>
       ),
@@ -420,7 +424,11 @@ export function CreateGroupModal({ visible, onClose, creatorId, onSuccess }: Cre
           <View style={{ width: 24 }} />
         </View>
 
-        <Stepper steps={steps} currentStep={currentStep} colors={colors} />
+        {/* Pass the current step content directly */}
+        <View style={styles.contentContainer}>
+          <Stepper steps={steps} currentStep={currentStep} colors={colors} />
+        </View>
+
       </View>
     </Modal>
   );
@@ -439,40 +447,54 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   closeButton: {
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
+    padding: 4, // Easier to tap
   },
   headerTitle: {
     fontSize: 18,
     fontWeight: '600',
   },
+  contentContainer: {
+    flex: 1,
+    paddingTop: 16, // Give stepper some space
+  },
+  stepContainer: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingBottom: 20, // Space for buttons at the bottom
+  },
+  scrollContentContainer: { // Style for ScrollView content
+    paddingBottom: 40, // Ensure space below buttons when scrolling
+  },
   label: {
-    marginTop: 24,
+    marginTop: 16, // Consistent spacing
     marginBottom: 8,
     fontSize: 14,
     fontWeight: '500',
   },
   input: {
     borderWidth: 1,
-    borderRadius: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderRadius: 8, // Slightly more rounded
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     fontSize: 16,
+    marginBottom: 10, // Space below inputs
   },
   primaryButton: {
-    marginTop: 20,
-    paddingVertical: 16,
+    marginTop: 24, // More space above buttons
+    paddingVertical: 14, // Slightly smaller padding
     borderRadius: 8,
     alignItems: 'center',
+    justifyContent: 'center', // Center content vertically
+    minHeight: 48, // Ensure tappable height
   },
   secondaryButton: {
     marginTop: 12,
-    paddingVertical: 16,
+    paddingVertical: 14,
     borderRadius: 8,
     alignItems: 'center',
-    borderWidth: 1,
+    justifyContent: 'center',
+    borderWidth: 1.5, // Slightly thicker border
+    minHeight: 48,
   },
   secondaryButtonText: {
     fontSize: 16,
@@ -482,51 +504,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  subscriptionContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingTop: 24,
-    paddingHorizontal: 16,
-  },
-  securityContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-  },
-  biometricsContent: {
+  passcodeContent: { // Re-purposed for passcode setup area
     width: '100%',
     alignItems: 'center',
-    paddingHorizontal: 16,
-  },
-  passcodeContent: {
-    width: '100%',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-  },
-  biometricIcon: {
-    marginBottom: 24,
+    marginTop: 20, // Space above passcode setup
   },
   securityTitle: {
-    fontSize: 24,
-    fontWeight: '700',
-    marginBottom: 12,
+    fontSize: 22, // Slightly smaller title
+    fontWeight: '600', // Less bold
+    marginBottom: 8,
+    textAlign: 'center', // Center align titles
   },
   securityDescription: {
-    fontSize: 16,
+    fontSize: 15, // Slightly smaller description
     textAlign: 'center',
     marginBottom: 20,
-    lineHeight: 22,
-  },
-  subtitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  description: {
-    fontSize: 14,
-    textAlign: 'center',
-    marginTop: 8,
+    lineHeight: 21, // Adjust line height
   },
   loading: {
     marginVertical: 24,
@@ -534,79 +527,117 @@ const styles = StyleSheet.create({
   backButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 24,
+    marginTop: 16, // Consistent spacing
     alignSelf: 'center',
+    padding: 8, // Make it easier to tap
   },
   backText: {
     marginLeft: 4,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '500',
   },
   logoPicker: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    borderWidth: 2,
+    width: 100, // Slightly smaller logo
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 1.5, // Thinner border
     borderStyle: 'dashed',
     justifyContent: 'center',
     alignItems: 'center',
     alignSelf: 'center',
-    marginVertical: 12,
+    marginVertical: 16, // More vertical space
   },
   logoImage: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
   },
   tagsContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     marginTop: 8,
+    marginBottom: 8, // Space below tags
   },
   tagChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 10, // More horizontal padding
+    paddingVertical: 5, // More vertical padding
     borderRadius: 16,
-    marginRight: 4,
-    marginBottom: 4,
+    marginRight: 6,
+    marginBottom: 6, // Consistent spacing
   },
   removeIcon: { 
-    marginLeft: 4 
+    marginLeft: 6 // More space for remove icon
   },
-  // Passcode styles
   passcodeDisplay: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginVertical: 24,
+    marginVertical: 20, // Adjusted spacing
   },
   passcodeDigit: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    borderWidth: 1,
-    margin: 8,
+    width: 18, // Smaller digits
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5, // Thicker border
+    marginHorizontal: 6, // Adjusted spacing
   },
   keypadContainer: {
     width: '100%',
-    maxWidth: 300,
-    marginBottom: 20,
+    maxWidth: 280, // Slightly smaller keypad
+    alignSelf: 'center', // Center keypad
+    marginTop: 10, // Space above keypad
   },
   keypadRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 16,
+    justifyContent: 'space-around', // Space out keys evenly
+    marginBottom: 12, // Adjusted spacing
   },
   keypadButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
+    width: 65, // Smaller keys
+    height: 65,
+    borderRadius: 32.5,
     justifyContent: 'center',
     alignItems: 'center',
   },
   keypadText: {
-    fontSize: 28,
-    fontWeight: '500',
+    fontSize: 26, // Smaller text
+    fontWeight: '400', // Normal weight
   },
+  authSelectionContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    width: '100%',
+    marginBottom: 20,
+  },
+  authCard: {
+    width: '45%', // Adjust width for spacing
+    aspectRatio: 1, // Make cards square
+    borderWidth: 1.5,
+    borderRadius: 12,
+    padding: 15,
+    alignItems: 'center',
+    justifyContent: 'center', // Center content
+  },
+  authCardTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginTop: 10,
+    marginBottom: 4,
+  },
+  authCardDescription: {
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  passcodeSetupContainer: {
+    width: '100%',
+    alignItems: 'center',
+    marginTop: 10, // Add space when keypad appears
+  },
+  confirmationText: {
+    marginTop: 15,
+    fontSize: 14,
+    textAlign: 'center',
+    fontWeight: '500',
+  }
 }); 

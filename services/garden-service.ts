@@ -33,6 +33,8 @@ export interface Membership {
   role: 'creator' | 'admin' | 'member' | 'pending';
   joinedAt: string;
   encryptedGroupKey?: string;
+  biometrics_enabled?: boolean;
+  passcode_hash?: string;
 }
 
 export interface Channel {
@@ -75,10 +77,18 @@ export async function createGarden({ name, creatorId, groupKey, description, tag
 }
 
 /**
- * Persists a new Garden to the `gardens` table.
+ * Persists a new Membership to the `memberships` table.
  * Throws if Supabase returns an error.
  */
-export async function createMembership({ userId, gardenId, role, joinedAt, encryptedGroupKey }: Membership) {
+export async function createMembership({ 
+  userId, 
+  gardenId, 
+  role, 
+  joinedAt, 
+  encryptedGroupKey,
+  biometrics_enabled,
+  passcode_hash
+}: Membership) {
   const { data, error } = await supabase
     .from('memberships')
     .insert({
@@ -87,6 +97,8 @@ export async function createMembership({ userId, gardenId, role, joinedAt, encry
       role,
       joined_at: joinedAt,
       encrypted_group_key: encryptedGroupKey,
+      biometrics_enabled: biometrics_enabled,
+      passcode_hash: passcode_hash,
     })
     .select()
     .single();
@@ -118,9 +130,21 @@ export function encryptForUser(aesKeyBase64: string, userPublicKeyBase64: string
 }
 
 /**
- * Convenience: create a garden then immediately add creator as owner in memberships table.
+ * Convenience: create a garden then immediately add creator as owner in memberships table,
+ * including the selected authentication method (biometrics or passcode).
  */
-export async function createGardenWithMembership({ name, creatorId, description, tags, logo }: Omit<Garden, 'groupKey'>) {
+export async function createGardenWithMembership({
+  name,
+  creatorId,
+  description,
+  tags,
+  logo,
+  authMethod,
+  passcode,
+}: Omit<Garden, 'groupKey'> & { 
+  authMethod: 'biometrics' | 'passcode' | null;
+  passcode?: string | null;
+}) {
   // generate AES key for the garden
   const aesKey = await generateGardenKey();
 
@@ -154,22 +178,36 @@ export async function createGardenWithMembership({ name, creatorId, description,
 
   const encryptedKey = encryptForUser(aesKey, userRow.public_key as string);
 
+  // Create the garden row
   const garden = await createGarden({ 
     name, 
     creatorId, 
     description, 
     tags, 
     logo: encryptedLogo, 
-    groupKey: aesKey 
+    groupKey: aesKey
   });
 
-  await createMembership({
+  // Prepare membership data including auth settings
+  let membershipData: Membership = {
     userId: creatorId,
     gardenId: garden.id,
     role: 'creator',
     joinedAt: new Date().toISOString(),
     encryptedGroupKey: encryptedKey,
-  });
+  };
+
+  if (authMethod === 'biometrics') {
+    membershipData.biometrics_enabled = true;
+  } else if (authMethod === 'passcode' && passcode) {
+    membershipData.passcode_hash = await Crypto.digestStringAsync(
+      Crypto.CryptoDigestAlgorithm.SHA256,
+      passcode
+    );
+  }
+
+  // Create the creator's membership with auth settings
+  await createMembership(membershipData);
 
   // create general channel
   const channel = await createChannel({ garden_id: garden.id, name: 'general' });
@@ -177,8 +215,6 @@ export async function createGardenWithMembership({ name, creatorId, description,
   // update garden row with general_channel id
   await supabase.from('gardens').update({ general_channel: channel.id }).eq('id', garden.id);
 
-  // create admin channel for membership approvals and admin notifications
-  
   // create staff-chat channel for admins, moderators, and creators
   const staffChannel = await createChannel({ garden_id: garden.id, name: 'staff-channel' });
 
@@ -461,130 +497,6 @@ export async function requestGardenMembership(
 
   if (insertError) throw insertError;
 
-  // Notify admins about the new membership request
-  await notifyAdminsAboutRequest(gardenId, userId);
-}
-
-/**
- * Notifies garden admins about new membership request
- */
-async function notifyAdminsAboutRequest(gardenId: string, userId: string): Promise<void> {
-  try {
-    // Get the user's profile information
-    const { data: userProfile, error: userError } = await supabase
-      .from('users')
-      .select('username, profile_pic')
-      .eq('id', userId)
-      .single();
-
-    if (userError) throw userError;
-
-    // Get all admins of the garden
-    const { data: admins, error: adminsError } = await supabase
-      .from('memberships')
-      .select('user_id')
-      .eq('garden_id', gardenId)
-      .in('role', ['creator', 'admin']);
-
-    if (adminsError) throw adminsError;
-
-    // Get garden name for notification
-    const { data: garden, error: gardenError } = await supabase
-      .from('gardens')
-      .select('name, creator')
-      .eq('id', gardenId)
-      .single();
-
-    if (gardenError) throw gardenError;
-
-    // Get admin feed channel ID
-    const { data: adminChannel, error: channelError } = await supabase
-      .from('channels')
-      .select('id')
-      .eq('garden_id', gardenId)
-      .eq('name', 'Admin Feed')
-      .single();
-
-    if (channelError && channelError.code !== 'PGRST116') throw channelError;
-
-    // If admin channel doesn't exist, create it
-    let adminChannelId = adminChannel?.id;
-    if (!adminChannelId) {
-      const { data: newChannel, error: createError } = await supabase
-        .from('channels')
-        .insert({
-          garden_id: gardenId,
-          name: 'Admin Feed',
-          description: 'Administrative notifications and approvals',
-          created_at: new Date().toISOString(),
-        })
-        .select()
-        .single();
-
-      if (createError) throw createError;
-      adminChannelId = newChannel.id;
-    }
-
-    // Create a system message for the membership request
-    const messageData = {
-      type: 'membership_request',
-      userId: userId,
-      username: userProfile.username,
-      profilePic: userProfile.profile_pic,
-      timestamp: new Date().toISOString(),
-      actionRequired: true,
-      gardenId: gardenId,
-    };
-
-    // ----------------------------
-    // 1️⃣ Persist notification rows for every admin/creator
-    // ----------------------------
-    const adminIds: string[] = admins.map(a => a.user_id);
-
-    // Ensure garden creator also receives the notification
-    if (garden?.creator && !adminIds.includes(garden.creator)) {
-      adminIds.push(garden.creator);
-    }
-
-    const rows = adminIds.map(id => ({
-      user_id: id,
-      garden_id: gardenId,
-      channel_id: adminChannelId,
-      payload: JSON.stringify(messageData),
-      type: 'membership_request',
-      created_at: new Date().toISOString(),
-    }));
-
-    const { error: notifErr } = await supabase
-      .from('notifications')
-      .insert(rows);
-    if (notifErr) throw notifErr;
-
-    // ----------------------------
-    // 2️⃣ Send push notifications to all admins/creator
-    // ----------------------------
-    const { data: adminProfiles } = await supabase
-      .from('users')
-      .select('push_token')
-      .in('id', adminIds);
-
-    const tokens = (adminProfiles || [])
-      .flatMap((p: any) => p.push_token ?? [])
-      .filter((t: string, idx: number, arr: string[]) => t && arr.indexOf(t) === idx);
-
-    if (tokens.length > 0) {
-      await sendPushNotification(
-        tokens,
-        'New Membership Request',
-        `${userProfile.username} requested to join ${garden.name}`,
-        { type: 'membership_request', gardenId }
-      );
-    }
-
-  } catch (error) {
-    console.error('Failed to notify admins:', error);
-    // Don't throw here to prevent breaking the membership request flow
-  }
 }
 
 /**
@@ -665,7 +577,6 @@ export async function approveMembershipRequest(
       .update({
         role: 'member',
         encrypted_group_key: encryptedGroupKey,
-        updated_at: new Date().toISOString(),
       })
       .eq('garden_id', gardenId)
       .eq('user_id', userId);
@@ -934,10 +845,11 @@ export async function enableGardenBiometrics(gardenId: string, userId: string): 
       .from('users')
       .select('public_key')
       .eq('id', userId)
-      .single();
+      .maybeSingle();
 
-    if (userError || !userData?.public_key) {
-      throw userError || new Error('Could not find user public key');
+    if (userError) throw userError;
+    if (!userData || !userData.public_key) {
+      throw new Error('Could not find user profile or public key to create pending membership.');
     }
 
     // Create a new pending membership
@@ -996,10 +908,11 @@ export async function setGardenPasscode(
       .from('users')
       .select('public_key')
       .eq('id', userId)
-      .single();
+      .maybeSingle();
 
-    if (userError || !userData?.public_key) {
-      throw userError || new Error('Could not find user public key');
+    if (userError) throw userError;
+    if (!userData || !userData.public_key) {
+      throw new Error('Could not find user profile or public key to create pending membership.');
     }
 
     // Create a new pending membership with passcode
@@ -1127,5 +1040,136 @@ export async function decryptGardenImage(encryptedData: string, gardenKey: strin
   } catch (error) {
     console.error('Error decrypting image:', error);
     throw new Error('Failed to decrypt image');
+  }
+}
+
+/**
+ * Updates the access settings for a garden.
+ * Requires garden table to have 'access_type' and 'passcode_hash' columns.
+ */
+export async function setGardenAccessSettings(
+  gardenId: string,
+  settings: { accessType: 'invite_only' | 'request_access' | 'passcode' | 'open'; passcode?: string }
+) {
+  let updateData: { access_type: string; passcode_hash?: string | null } = {
+    access_type: settings.accessType,
+    passcode_hash: null, // Default to null unless passcode is provided
+  };
+
+  if (settings.accessType === 'passcode' && settings.passcode) {
+    // Hash the passcode if provided for passcode access type
+    updateData.passcode_hash = await Crypto.digestStringAsync(
+      Crypto.CryptoDigestAlgorithm.SHA256,
+      settings.passcode
+    );
+  } else if (settings.accessType !== 'passcode') {
+    // Ensure hash is cleared if switching away from passcode
+    updateData.passcode_hash = null;
+  }
+
+  const { error } = await supabase
+    .from('gardens')
+    .update(updateData)
+    .eq('id', gardenId);
+
+  if (error) {
+    console.error('Error updating garden access settings:', error);
+    throw error;
+  }
+}
+
+/**
+ * Specialized function for joining a garden via passcode authentication.
+ * Uses the verified passcode flow to join a garden with proper security settings.
+ * This version generates a fresh AES key rather than trying to decrypt the creator's key.
+ */
+export async function joinGardenWithVerifiedPasscode(
+  gardenId: string, 
+  userId: string
+): Promise<boolean> {
+  try {
+    console.log('Starting direct-join process with verified passcode');
+    
+    // 1. Get existing membership to preserve security settings
+    const { data: existingMembership, error: membershipError } = await supabase
+      .from('memberships')
+      .select('biometrics_enabled, passcode_hash')
+      .eq('garden_id', gardenId)
+      .eq('user_id', userId)
+      .maybeSingle();
+      
+    // Get existing security settings to preserve
+    const biometrics_enabled = existingMembership?.biometrics_enabled;
+    const passcode_hash = existingMembership?.passcode_hash;
+    
+    console.log('Existing membership found:', existingMembership ? 'yes' : 'no');
+    
+    // 2. Get the user's public key for encryption
+    const { data: userData, error: userError } = await supabase
+      .from('users')
+      .select('public_key')
+      .eq('id', userId)
+      .single();
+      
+    if (userError || !userData?.public_key) {
+      console.error('Failed to get user public key:', userError);
+      throw new Error('Could not find user\'s public key');
+    }
+    
+    // 3. Generate a new AES symmetric key for this membership
+    console.log('Generating new AES key for membership...');
+    const newGroupKey = await generateAESSymmetricKey();
+    console.log('New garden key generated successfully');
+    
+    // 4. Encrypt the key for the user
+    console.log('Encrypting garden key for user...');
+    const encryptedGroupKey = encryptForUser(newGroupKey, userData.public_key);
+    console.log('Garden key successfully encrypted');
+    
+    // 5. Update or create membership with the new encrypted key
+    if (existingMembership) {
+      // Update existing membership
+      console.log('Updating existing membership with new garden key');
+      const { error: updateError } = await supabase
+        .from('memberships')
+        .update({
+          role: 'member',
+          encrypted_group_key: encryptedGroupKey,
+          biometrics_enabled: biometrics_enabled,
+          passcode_hash: passcode_hash,
+        })
+        .eq('garden_id', gardenId)
+        .eq('user_id', userId);
+        
+      if (updateError) {
+        console.error('Error updating membership:', updateError);
+        throw updateError;
+      }
+    } else {
+      // Create new membership
+      console.log('Creating new membership with garden key');
+      const { error: insertError } = await supabase
+        .from('memberships')
+        .insert({
+          garden_id: gardenId,
+          user_id: userId,
+          role: 'member',
+          encrypted_group_key: encryptedGroupKey,
+          biometrics_enabled: biometrics_enabled,
+          passcode_hash: passcode_hash,
+          joined_at: new Date().toISOString(),
+        });
+        
+      if (insertError) {
+        console.error('Error creating membership:', insertError);
+        throw insertError;
+      }
+    }
+    
+    console.log('Garden join completed successfully!');
+    return true;
+  } catch (error) {
+    console.error('Error joining garden with verified passcode:', error);
+    throw error;
   }
 }

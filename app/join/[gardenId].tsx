@@ -22,6 +22,7 @@ import {
   requestGardenMembership,
   decryptGardenImage,
   getGroupKeyForGarden,
+  joinGardenWithVerifiedPasscode,
 } from '@/services/garden-service';
 import { supabase } from '@/services/supabase-singleton';
 import * as Linking from 'expo-linking';
@@ -35,6 +36,7 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import * as SecureStore from 'expo-secure-store';
 import { getStoredPrivateKey } from '@/utils/provisioning';
 import { registerForPushNotifications } from '@/services/notifications-service';
+import * as Crypto from 'expo-crypto';
 
 // Keep only the imports we need for the authentication modal
 const PASSCODE_KEY = 'user_passcode';
@@ -337,7 +339,7 @@ const Step2 = () => {
           <View key={`row-${rowIndex}`} style={styles.dialpadRow}>
             {row.map((num, colIndex) => (
               <Pressable
-                key={`key-${rowIndex}-${colIndex}`}
+                key={`key-step2-${rowIndex}-${colIndex}`}
                 style={({pressed}) => [
                   styles.dialpadKey,
                   {
@@ -534,103 +536,337 @@ const Step2 = () => {
 };
 
 // --- Step 3 (formerly Step 4): Submit membership request ---
-const Step3 = () => (
-  <View style={styles.stepContainer}>
-    <Text style={[styles.title, { color: colors.text }]}>Join {garden?.name || 'Garden'}</Text>
-    <Text style={[styles.subtitle, { color: colors.secondaryText, marginBottom: 24 }]}>
-      Request to join this garden. Garden admins will review your request.
-    </Text>
-    <TouchableOpacity
-      style={[styles.button, { backgroundColor: colors.primary }]}
-      onPress={async () => {
-        setLoading(true);
-        try {
-          if (user) {
-            // Check if user has completed authentication setup
-            const hasCompletedSetup = (biometricsEnabled || securitySetupComplete) && passcode.length === 6;
-            
-            if (!hasCompletedSetup) {
-              Alert.alert(
-                'Setup Required',
-                'Please complete the security setup before requesting to join the garden.',
-                [
-                  { 
-                    text: 'Go Back', 
-                    onPress: () => setStep(2)
-                  }
-                ]
-              );
-              return;
-            }
-            
-            try {
-              console.log('Requesting garden membership for user', user.id, 'to garden', gardenId);
-              
-              // Register for push notifications to ensure we have push tokens
-              await registerForPushNotifications(user.id);
-              
-              // Request membership - this will create a pending membership if one doesn't exist
-              // or update an existing one to pending status
-              await requestGardenMembership(gardenId, user.id);
-              console.log('Membership request completed successfully');
-              
-              // Verify the pending membership was created
-              const { data, error } = await supabase
-                .from('memberships')
-                .select('role')
-                .eq('garden_id', gardenId)
-                .eq('user_id', user.id)
-                .single();
-              
-              if (error) {
-                console.error('Error checking membership status:', error);
-              } else {
-                console.log('Current membership status:', data);
-              }
-              
-              // Move to the final pending step
-              setStep(4);
-            } catch (error) {
-              console.error('Membership request failed', error);
-              Alert.alert('Error', error instanceof Error ? error.message : 'Failed to request garden membership');
-            }
-          } else {
-            // If no user is logged in, show authentication UI
-            setShowAuthModal(true);
-          }
-        } catch (e) {
-          console.error('Process error:', e);
-          Alert.alert('Error', e instanceof Error ? e.message : 'An unexpected error occurred');
-        } finally {
-        setLoading(false);
-        }
-      }}
-      disabled={loading}
-    >
-      {loading
-        ? <ActivityIndicator color="white" />
-        : <Text style={styles.buttonText}>Request to Join</Text>
-      }
-    </TouchableOpacity>
+const Step3 = () => {
+  const [gardenPasscode, setGardenPasscode] = useState('');
+  const [gardenPasscodeError, setGardenPasscodeError] = useState<string | null>(null);
+  const [isVerifyingPasscode, setIsVerifyingPasscode] = useState(false);
+  const accessType = garden?.access_type || 'request_access'; // Default to "apply" for backward compatibility
+  const [isProvisioning, setIsProvisioning] = useState(false);
+  const [provisioningProgress, setProvisioningProgress] = useState(0);
+
+  // Handle direct join for open gardens
+  useEffect(() => {
+    if (accessType === 'open' && user) {
+      handleOpenAccess();
+    }
+  }, [accessType, user]);
+
+  // Handle open access - automatically join the garden
+  const handleOpenAccess = async () => {
+    if (!user) return;
     
-    <TouchableOpacity
-      style={[styles.buttonOutlined, { borderColor: colors.primary, marginTop: 12 }]}
-      onPress={() => {
-        if (!user) {
-          // Redirect to auth screen if user not authenticated
-          router.push('/auth');
-        } else {
-          // Go back to previous step (Security Setup)
-          setStep(2);
+    setLoading(true);
+    try {
+      console.log('Auto-joining open access garden', gardenId);
+      await joinGarden(gardenId, user.id);
+      router.replace(`/garden/${gardenId}`);
+    } catch (error) {
+      console.error('Failed to auto-join open garden:', error);
+      Alert.alert('Error', 'Failed to join garden. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle standard application request
+  const handleRequestAccess = async () => {
+    if (!user) return;
+    
+    setLoading(true);
+    try {
+      // Check if user has completed authentication setup
+      const hasCompletedSetup = biometricsEnabled || passcodeSet;
+      
+      if (!hasCompletedSetup) {
+        Alert.alert(
+          'Setup Required',
+          'Please complete the security setup before requesting to join the garden.',
+          [{ text: 'Go Back', onPress: () => setStep(2) }]
+        );
+        return;
+      }
+      
+      // Register for push notifications to ensure we have push tokens
+      await registerForPushNotifications(user.id);
+      
+      // Request membership
+      await requestGardenMembership(gardenId, user.id);
+      
+      // Move to pending screen
+      setStep(4);
+    } catch (error) {
+      console.error('Membership request failed', error);
+      Alert.alert('Error', error instanceof Error ? error.message : 'Failed to request garden membership');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Modified passcode verification and join flow
+  const handlePasscodeSubmit = async () => {
+    if (!user || gardenPasscode.length !== 6) return;
+
+    setIsVerifyingPasscode(true);
+    try {
+      // Hash the entered passcode for comparison
+      const hashedPasscode = await Crypto.digestStringAsync(
+        Crypto.CryptoDigestAlgorithm.SHA256,
+        gardenPasscode
+      );
+
+      // Fetch the garden's stored passcode hash
+      const { data, error } = await supabase
+        .from('gardens')
+        .select('passcode_hash')
+        .eq('id', gardenId)
+        .single();
+
+      if (error) throw error;
+
+      // Compare the hashes
+      if (data?.passcode_hash === hashedPasscode) {
+        setIsVerifyingPasscode(false);
+        
+        // Show key provisioning UI
+        setIsProvisioning(true);
+        
+        // Simulate progress updates (real progress is hard to track for crypto operations)
+        const timer = setInterval(() => {
+          setProvisioningProgress(prev => {
+            const newProgress = prev + (Math.random() * 15);
+            return newProgress > 95 ? 95 : newProgress;
+          });
+        }, 400);
+        
+        try {
+          // Use our new specialized function
+          await joinGardenWithVerifiedPasscode(gardenId, user.id);
+          
+          // Set to 100% complete
+          clearInterval(timer);
+          setProvisioningProgress(100);
+          
+          // Short delay to show 100% completion before navigating
+          setTimeout(() => {
+            router.replace(`/garden/${gardenId}`);
+          }, 500);
+        } catch (error) {
+          clearInterval(timer);
+          setIsProvisioning(false);
+          console.error('Failed to join garden with verified passcode:', error);
+          Alert.alert('Error', 'Failed to provision garden keys. Please try again.');
         }
-      }}
-    >
-      <Text style={[styles.buttonTextOutlined, { color: colors.primary }]}>
-        {user ? "Back" : "Sign In"}
+      } else {
+        // Incorrect passcode
+        setGardenPasscodeError('Incorrect passcode. Please try again.');
+        setGardenPasscode('');
+        setIsVerifyingPasscode(false);
+      }
+    } catch (error) {
+      console.error('Passcode verification error:', error);
+      setGardenPasscodeError('Failed to verify passcode. Please try again.');
+      setIsVerifyingPasscode(false);
+    }
+  };
+
+  // Render garden passcode input UI
+  const renderGardenPasscodeInput = () => {
+    return (
+      <View style={styles.passcodeContainer}>
+        <Text style={[styles.sectionTitle, { color: colors.text }]}>Garden Passcode</Text>
+        <Text style={[styles.subtitle, { color: colors.secondaryText, marginBottom: 10 }]}>
+          Enter the 6-digit passcode provided by the garden admin
+        </Text>
+
+        {gardenPasscodeError && (
+          <Text style={[styles.errorText, { color: colors.error, marginBottom: 10 }]}>
+            {gardenPasscodeError}
+          </Text>
+        )}
+
+        <View style={styles.passcodeDotsContainer}>
+          {[...Array(6)].map((_, index) => (
+            <View
+              key={`gkey-step3-${index}`}
+              style={[
+                styles.passcodeDot,
+                {
+                  backgroundColor: index < gardenPasscode.length ? colors.primary : 'transparent',
+                  borderColor: colors.primary
+                }
+              ]}
+            />
+          ))}
+        </View>
+
+        <View style={styles.dialpadContainer}>
+          {[
+            ['1', '2', '3'],
+            ['4', '5', '6'],
+            ['7', '8', '9'],
+            ['', '0', 'DEL']
+          ].map((row, rowIndex) => (
+            <View key={`grow-${rowIndex}`} style={styles.dialpadRow}>
+              {row.map((num, colIndex) => (
+                <Pressable
+                  key={`gkey-step3-${rowIndex}-${colIndex}`}
+                  style={({pressed}) => [
+                    styles.dialpadKey,
+                    {
+                      backgroundColor: pressed
+                        ? colors.primary + '30'
+                        : colorScheme === 'dark' ? '#2C2C2E' : '#F2F2F7',
+                      opacity: num === '' ? 0 : 1
+                    }
+                  ]}
+                  onPress={() => {
+                    if (num === 'DEL') {
+                      setGardenPasscode(prev => prev.slice(0, -1));
+                      setGardenPasscodeError(null);
+                    } else if (gardenPasscode.length < 6) {
+                      setGardenPasscode(prev => prev + num);
+                      setGardenPasscodeError(null);
+                    }
+                  }}
+                  disabled={num === '' || isVerifyingPasscode}
+                >
+                  {num === 'DEL' ? (
+                    <Ionicons name="backspace-outline" size={24} color={colors.text} />
+                  ) : (
+                    <Text style={[styles.dialpadKeyText, { color: colors.text }]}>{num}</Text>
+                  )}
+                </Pressable>
+              ))}
+            </View>
+          ))}
+        </View>
+
+        <TouchableOpacity
+          style={[
+            styles.button,
+            {
+              backgroundColor: gardenPasscode.length === 6 ? colors.primary : colors.secondaryText,
+              marginTop: 24
+            }
+          ]}
+          onPress={handlePasscodeSubmit}
+          disabled={isVerifyingPasscode || gardenPasscode.length !== 6}
+        >
+          {isVerifyingPasscode ? <ActivityIndicator color="white" /> : <Text style={styles.buttonText}>Submit Passcode</Text>}
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  // Show loading indicator while setting up auto-join
+  if (accessType === 'open' && loading) {
+    return (
+      <View style={styles.centeredContainer}>
+        <ActivityIndicator size="large" color={colors.primary} />
+        <Text style={[styles.subtitle, { color: colors.secondaryText, marginTop: 16 }]}>
+          Joining garden...
+        </Text>
+      </View>
+    );
+  }
+
+  // Add key provisioning UI that shows when isProvisioning is true
+  if (isProvisioning) {
+    return (
+      <View style={styles.stepContainer}>
+        <View style={styles.provisioningContainer}>
+          <View style={[styles.provisioningCircle, { backgroundColor: colors.primary + '20' }]}>
+            <Ionicons name="key" size={80} color={colors.primary} />
+          </View>
+          
+          {/* Progress indicator */}
+          <View style={styles.progressContainer}>
+            <View 
+              style={[
+                styles.progressBar, 
+                { backgroundColor: colors.border }
+              ]}
+            >
+              <View 
+                style={[
+                  styles.progressBarFill, 
+                  { 
+                    backgroundColor: colors.primary,
+                    width: `${provisioningProgress}%` 
+                  }
+                ]}
+              />
+            </View>
+            <Text style={[styles.progressText, { color: colors.secondaryText }]}>
+              {Math.round(provisioningProgress)}%
+            </Text>
+          </View>
+        </View>
+        
+        <Text style={[styles.title, { color: colors.text }]}>Provisioning Secure Keys</Text>
+        <Text style={[styles.subtitle, { color: colors.secondaryText }]}>
+          Creating encrypted access keys for this garden. Please wait...
+        </Text>
+      </View>
+    );
+  }
+
+  // Handle different UI based on access type
+  if (accessType === 'passcode') {
+    return (
+      <View style={styles.stepContainer}>
+        <Text style={[styles.title, { color: colors.text }]}>Join {garden?.name || 'Garden'}</Text>
+        <Text style={[styles.subtitle, { color: colors.secondaryText, marginBottom: 16 }]}>
+          This garden requires a passcode to join
+        </Text>
+        {renderGardenPasscodeInput()}
+        <TouchableOpacity
+          style={[styles.buttonOutlined, { borderColor: colors.primary, marginTop: 12 }]}
+          onPress={() => setStep(2)}
+        >
+          <Text style={[styles.buttonTextOutlined, { color: colors.primary }]}>Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // Default UI for 'apply' access type
+  return (
+    <View style={styles.stepContainer}>
+      <Text style={[styles.title, { color: colors.text }]}>Join {garden?.name || 'Garden'}</Text>
+      <Text style={[styles.subtitle, { color: colors.secondaryText, marginBottom: 24 }]}>
+        Request to join this garden. Garden admins will review your request.
       </Text>
-    </TouchableOpacity>
-  </View>
-);
+      <TouchableOpacity
+        style={[styles.button, { backgroundColor: colors.primary }]}
+        onPress={handleRequestAccess}
+        disabled={loading}
+      >
+        {loading
+          ? <ActivityIndicator color="white" />
+          : <Text style={styles.buttonText}>Request to Join</Text>
+        }
+      </TouchableOpacity>
+      
+      <TouchableOpacity
+        style={[styles.buttonOutlined, { borderColor: colors.primary, marginTop: 12 }]}
+        onPress={() => {
+          if (!user) {
+            // Redirect to auth screen if user not authenticated
+            router.push('/auth');
+          } else {
+            // Go back to previous step (Security Setup)
+            setStep(2);
+          }
+        }}
+      >
+        <Text style={[styles.buttonTextOutlined, { color: colors.primary }]}>
+          {user ? "Back" : "Sign In"}
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
 
 // --- Step 4 (formerly Step 5): Membership Pending ---
 const Step4 = () => (
@@ -764,7 +1000,7 @@ const AuthModal = () => {
           <View key={`row-${rowIndex}`} style={styles.dialpadRow}>
             {row.map((num, colIndex) => (
               <Pressable
-                key={`key-${rowIndex}-${colIndex}`}
+                key={`key-auth-${rowIndex}-${colIndex}`}
                 style={({pressed}) => [
                   styles.dialpadKey,
                   { 
@@ -1180,13 +1416,60 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 30,
     paddingVertical: 20,
-   // backgroundColor: colors.background, // or a slightly different shade
-   // borderRadius: 12,
   },
   sectionTitle: {
     fontSize: 20,
     fontWeight: '600',
     marginBottom: 16,
     textAlign: 'center',
+  },
+  passcodeContainer: {
+    width: '100%',
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  errorText: {
+    fontSize: 16,
+    fontWeight: '500',
+    marginBottom: 10,
+  },
+  centeredContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  // Provisioning styles
+  provisioningContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 24,
+  },
+  provisioningCircle: {
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  progressContainer: {
+    width: '80%',
+    marginTop: 20,
+    alignItems: 'center',
+  },
+  progressBar: {
+    width: '100%',
+    height: 8,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  progressText: {
+    marginTop: 8,
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

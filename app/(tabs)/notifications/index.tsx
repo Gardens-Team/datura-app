@@ -61,6 +61,7 @@ export default function NotificationsScreen() {
   async function fetchNotifications() {
     if (!user) return;
     
+    console.log('[NotificationsScreen] Fetching notifications for user:', user.id);
     setLoading(true);
     try {
       // Fetch user notifications
@@ -70,7 +71,15 @@ export default function NotificationsScreen() {
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
         
-      if (error) throw error;
+      if (error) {
+        console.error('[NotificationsScreen] Error fetching notifications:', error);
+        throw error;
+      }
+      
+      console.log(`[NotificationsScreen] Retrieved ${data?.length || 0} notifications`);
+      if (data && data.length > 0) {
+        console.log('[NotificationsScreen] First notification:', JSON.stringify(data[0]));
+      }
       
       // Process each notification
       const processedData = (data || []).map(parseNotificationData);

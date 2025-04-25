@@ -18,6 +18,8 @@ import {
   Modal,
   ScrollView,
   Animated,
+  FlatList,
+  TextInput,
 } from 'react-native';
 import {
   GiftedChat,
@@ -55,6 +57,8 @@ import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useEffect as useDebugEffect } from 'react';
 import * as Sharing from 'expo-sharing';
 import AdminNotification from '@/components/AdminNotification';
+import { useTheme } from '@react-navigation/native';
+import ParsedText from 'react-native-parsed-text';
 
 // Custom interface for the recording state
 interface RecordingState {
@@ -276,6 +280,13 @@ export default function ChannelScreen() {
   const currentRole = currentMember?.role;
   const isAdminUser = currentRole === 'creator' || currentRole === 'admin' || currentRole === 'moderator';
 
+  // Add these new state variables
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const [mentionSuggestions, setMentionSuggestions] = useState<ChannelUser[]>([]);
+  const [currentTextInput, setCurrentTextInput] = useState('');
+  const [mentionedUsers, setMentionedUsers] = useState<string[]>([]);
+  const [mentionStartIndex, setMentionStartIndex] = useState<number>(-1);
+
   // Fetch channel and garden info
   useEffect(() => {
     async function fetchChannelInfo() {
@@ -439,13 +450,24 @@ export default function ChannelScreen() {
 
   // Modify the fetchMessages function to get user profiles
   const loadMessages = useCallback(async () => {
-    if (!id) return;
+    if (!id || !groupKey) return;
     console.log(`[ChannelScreen] Loading messages for channel ${id}`);
     
     setIsLoading(true);
     try {
-      const msgs = await fetchMessages(id as string, groupKey!);
+      const msgs = await fetchMessages(id as string, groupKey);
       console.log(`[ChannelScreen] Retrieved ${msgs.length} messages`);
+      
+      // Log message details for debugging
+      if (msgs.length > 0) {
+        console.log(`[ChannelScreen] Message samples:`, 
+          msgs.slice(0, Math.min(3, msgs.length)).map(m => ({
+            id: m._id,
+            text: m.text?.substring(0, 20),
+            sender: m.user._id,
+            name: m.user.name
+        })));
+      }
       
       // Extract all unique user IDs from messages
       const userIds = msgs
@@ -465,8 +487,8 @@ export default function ChannelScreen() {
             ...msg,
             user: {
               ...msg.user,
-              name: profile.username || msg.user.name,
-              avatar: profile.profile_pic || msg.user.avatar
+              name: profile.username || msg.user.name || 'Unknown User',
+              avatar: profile.profile_pic || msg.user.avatar || ''
             }
           };
         }
@@ -801,20 +823,137 @@ export default function ChannelScreen() {
     </View>
   ) : null;
 
-  // Handle send including replyTo
-  const onSend = useCallback(async (newMessages: IMessage[] = []) => {
-    if (!user || !newMessages.length) return;
-    // locked check omitted for brevity
-    const m = newMessages[0];
-    const extendedMsg: ExtendedMessage = {
-      ...m,
-      user: { _id: user.id, name: user.username, avatar: user.profile_pic },
-      replyTo: replyTo? replyTo._id as string : undefined,
-    };
-    setMessages(prev => GiftedChat.append(prev, [extendedMsg]));
-    setReplyTo(null);
-    await sendMessage(id as string, extendedMsg, groupKey!);
-  }, [user, id, groupKey, replyTo, sendMessage]);
+  // Update the getMentionSuggestions function for better logging and filtering
+  const getMentionSuggestions = useCallback(async (searchTerm: string) => {
+    console.log(`[Mention] Searching for users matching "${searchTerm}"`);
+    setMentionLoading(true);
+    
+    try {
+      // If we already have channel users, filter them locally
+      if (channelUsers.length > 0) {
+        console.log(`[Mention] Filtering ${channelUsers.length} channel users`);
+        console.log(`[Mention] Channel users:`, channelUsers.map(u => u.username));
+        console.log(`[Mention] Current user ID:`, user?.id);
+        
+        const filteredUsers = channelUsers.filter(
+          channelUser => channelUser.username.toLowerCase().includes(searchTerm.toLowerCase()) && 
+                  channelUser.id !== user?.id // Don't suggest the current user
+        );
+        console.log(`[Mention] Found ${filteredUsers.length} matching users`);
+        setMentionSuggestions(filteredUsers);
+        setMentionLoading(false);
+        return;
+      }
+      
+      // Otherwise, fetch users from Supabase
+      console.log(`[Mention] Fetching users from Supabase matching "${searchTerm}"`);
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, username, profile_pic')
+        .ilike('username', `%${searchTerm}%`)
+        .not('id', 'eq', user?.id) // Don't show the current user
+        .limit(5);
+      
+      if (error) {
+        console.error('[Mention] Error fetching mention suggestions:', error);
+        setMentionLoading(false);
+        return;
+      }
+      
+      if (data && data.length) {
+        console.log(`[Mention] Found ${data.length} users from Supabase`);
+        const formattedUsers = data.map(user => ({
+          id: user.id,
+          username: user.username || 'User',
+          avatar: user.profile_pic || '',
+          status: 'online' as const,
+        }));
+        
+        setMentionSuggestions(formattedUsers);
+      } else {
+        console.log('[Mention] No users found');
+        setMentionSuggestions([]);
+      }
+    } catch (error) {
+      console.error('[Mention] Error getting mention suggestions:', error);
+      setMentionSuggestions([]);
+    } finally {
+      setMentionLoading(false);
+    }
+  }, [channelUsers, user?.id]);
+
+  // Improve handleInputTextChanged for better mention detection
+  const handleInputTextChanged = useCallback((text: string) => {
+    setCurrentTextInput(text);
+    console.log(`[Mention] Input text changed: "${text}"`);
+    
+    // Check if user is typing a mention
+    const lastAtSymbolIndex = text.lastIndexOf('@');
+    if (lastAtSymbolIndex !== -1) {
+      // Check if @ is at the start of the text or after a space
+      if (lastAtSymbolIndex === 0 || text[lastAtSymbolIndex - 1] === ' ') {
+        const query = text.substring(lastAtSymbolIndex + 1);
+        console.log(`[Mention] Detected @ at index ${lastAtSymbolIndex}, query: "${query}"`);
+        setMentionStartIndex(lastAtSymbolIndex);
+        getMentionSuggestions(query);
+        return;
+      }
+    }
+    
+    // If we're not currently typing a mention, clear suggestions
+    if (mentionSuggestions.length > 0) {
+      console.log('[Mention] Clearing suggestions');
+      setMentionSuggestions([]);
+      setMentionStartIndex(-1);
+    }
+  }, [getMentionSuggestions, mentionSuggestions.length]);
+
+  // Handle selecting a user from mention suggestions
+  const handleSelectMention = useCallback((user: ChannelUser) => {
+    if (mentionStartIndex === -1) return;
+    
+    // Replace the @query with @username
+    const beforeMention = currentTextInput.substring(0, mentionStartIndex);
+    const afterMention = currentTextInput.substring(mentionStartIndex + 1 + (currentTextInput.substring(mentionStartIndex + 1).split(' ')[0]).length);
+    const newText = `${beforeMention}@${user.username} ${afterMention}`;
+    
+    // Update the text input
+    setCurrentTextInput(newText);
+    
+    // Add user to mentioned users list
+    setMentionedUsers(prev => [...prev.filter(id => id !== user.id), user.id]);
+    
+    // Clear suggestions
+    setMentionSuggestions([]);
+    setMentionStartIndex(-1);
+  }, [mentionStartIndex, currentTextInput]);
+  
+  // Modified onSend function to include mentioned users
+  const onSend = useCallback(async (messages: IMessage[] = []) => {
+    if (messages.length === 0 || channelLocked) return;
+    
+    try {
+      const messageToSend = {
+        ...messages[0],
+        user: {
+          _id: user?.id || '',
+          name: user?.username || '',
+          avatar: user?.profile_pic || '',
+        },
+        garden: garden || undefined,
+        mentioned_users: mentionedUsers.length > 0 ? mentionedUsers : undefined,
+      };
+      
+      await sendMessage(id as string, messageToSend as ExtendedMessage, groupKey!);
+      
+      // Reset mentioned users after sending
+      setMentionedUsers([]);
+      setCurrentTextInput('');
+    } catch (e) {
+      console.error('[ChannelScreen] Failed to send message:', e);
+      Alert.alert('Error', 'Failed to send message. Please try again.');
+    }
+  }, [id, sendMessage, user, garden, groupKey, channelLocked, mentionedUsers]);
 
   // Handle avatar press
   const onAvatarPress = (avatarUser: any) => {
@@ -910,7 +1049,94 @@ export default function ChannelScreen() {
     );
   };
 
-  // Customize bubble component
+  // Replace the renderMessageText function to use Inter font and highlight mentions
+  const renderMessageText = (props: any) => {
+    const { currentMessage } = props;
+    
+    // If we have mentioned users, use ParsedText to highlight mentions
+    if (currentMessage.mentioned_users && currentMessage.mentioned_users.length > 0) {
+      // Get usernames for the mentioned user IDs
+      const mentionedUsers = currentMessage.mentioned_users
+        .map((userId: string) => {
+          const user = channelUsers.find(u => u.id === userId);
+          return user ? user.username : null;
+        })
+        .filter(Boolean);
+        
+      if (mentionedUsers.length > 0) {
+        // Create a pattern to match @username where username is any of the mentioned users
+        const mentionPattern = new RegExp(`@(${mentionedUsers.join('|')})\\b`, 'g');
+        
+        return (
+          <View style={{ flex: 1 }}>
+            <ParsedText
+              style={{
+                fontFamily: 'Inter',
+                fontSize: 15,
+                lineHeight: 20,
+                color: props.position === 'left' ? colors.text : 'white',
+              }}
+              parse={[
+                { 
+                  pattern: mentionPattern, 
+                  style: { 
+                    color: colors.primary, 
+                    fontWeight: 'bold',
+                  }, 
+                  onPress: (match: string, index: number) => {
+                    // Extract username from the match removing the @ symbol
+                    const username = match.substring(1); // Remove @ prefix
+                    const userWithUsername = channelUsers.find(u => u.username === username);
+                    if (userWithUsername) {
+                      setProfileUser(userWithUsername);
+                      setProfileModalVisible(true);
+                    }
+                  }
+                },
+                // Handle links too
+                {
+                  type: 'url',
+                  style: { color: props.position === 'left' ? colors.primary : 'rgba(255, 255, 255, 0.9)' },
+                }
+              ]}
+            >
+              {currentMessage.text}
+            </ParsedText>
+          </View>
+        );
+      }
+    }
+    
+    // Otherwise use the standard MessageText for messages without mentions
+    return (
+      <MessageText
+        {...props}
+        textStyle={{
+          left: {
+            fontFamily: 'Inter',
+            fontSize: 15,
+            lineHeight: 20,
+            color: colors.text,
+          },
+          right: {
+            fontFamily: 'Inter',
+            fontSize: 15,
+            lineHeight: 20,
+            color: 'white',
+          },
+        }}
+        linkStyle={{
+          left: { color: colors.primary },
+          right: { color: 'rgba(255, 255, 255, 0.9)' },
+        }}
+        customTextStyle={{ 
+          fontFamily: 'Inter',
+        }}
+      />
+    );
+  };
+
+  // Improve the bubble styling
   const renderBubble = (props: any) => {
     return (
       <Bubble
@@ -919,38 +1145,35 @@ export default function ChannelScreen() {
           left: {
             backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#F2F2F7',
             borderRadius: 18,
-            marginBottom: 2,
+            marginBottom: 4,
             marginLeft: 0,
             marginRight: 60,
-            paddingVertical: 6,
-            paddingHorizontal: 12,
+            paddingVertical: 8,
+            paddingHorizontal: 14,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 1 },
+            shadowOpacity: colorScheme === 'dark' ? 0.2 : 0.08,
+            shadowRadius: 1,
+            elevation: 1,
           },
           right: {
             backgroundColor: colors.primary,
             borderRadius: 18,
-            marginBottom: 2,
+            marginBottom: 4,
             marginLeft: 60,
-            paddingVertical: 6,
-            paddingHorizontal: 12,
+            paddingVertical: 8,
+            paddingHorizontal: 14,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 1 },
+            shadowOpacity: 0.1,
+            shadowRadius: 1,
+            elevation: 1,
           },
         }}
         tickStyle={{ color: colors.secondaryText }}
         textStyle={{
-          left: { color: colors.text },
-          right: { color: 'white' },
-        }}
-      />
-    );
-  };
-  
-  // Customize message text
-  const renderMessageText = (props: any) => {
-    return (
-      <MessageText
-        {...props}
-        textStyle={{
-          left: { color: colors.text },
-          right: { color: 'white' },
+          left: { fontFamily: 'Inter', color: colors.text },
+          right: { fontFamily: 'Inter', color: 'white' },
         }}
       />
     );
@@ -973,107 +1196,73 @@ export default function ChannelScreen() {
     );
   };
   
-  // Custom input toolbar
-  const renderInputToolbar = (props: any) => {
-    // If channel is locked, show locked message instead of input
-    if (channelLocked) {
-      return (
-        <View style={[
-          styles.lockedContainer, 
-          { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7' }
-        ]}>
-          <Ionicons name="lock-closed" size={18} color={colors.secondaryText} />
-          <Text style={[styles.lockedText, { color: colors.secondaryText }]}>
-            This channel has been locked by an admin
-          </Text>
-        </View>
-      );
-    }
+  // Improve renderMentionSuggestions for better visibility
+  const renderMentionSuggestions = () => {
+    if (mentionSuggestions.length === 0) return null;
     
-    // If in recording mode, show recording controls
-    if (recording.isRecording) {
-      return (
-        <View style={[styles.recordingContainer, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F9F9F9' }]}>
-          <View style={styles.recordingInfo}>
-            <View style={styles.recordingIndicator} />
-            <Text style={[styles.recordingText, { color: colors.text }]}>
-              Recording... {formatTime(recording.recordingDuration)}
-            </Text>
-          </View>
-          <View style={styles.recordingActions}>
-            <TouchableOpacity style={styles.cancelButton} onPress={cancelRecording}>
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.sendButton} onPress={stopRecording}>
-              <Text style={styles.sendText}>Done</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      );
-    }
-    
-    // If recording is done, show preview with send button
-    if (recording.isDoneRecording && recording.recordingUri) {
-      return (
-        <View style={[styles.recordingContainer, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F9F9F9' }]}>
-          <View style={styles.recordingInfo}>
-            <Ionicons name="mic" size={20} color={colors.primary} />
-            <Text style={[styles.recordingText, { color: colors.text }]}>
-              Audio message ({formatTime(recording.recordingDuration)})
-            </Text>
-          </View>
-          <View style={styles.recordingActions}>
-            <TouchableOpacity style={styles.cancelButton} onPress={cancelRecording}>
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.sendButton} onPress={sendAudioMessage}>
-              <Text style={styles.sendText}>Send</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      );
-    }
-    
-    // Normal input toolbar
     return (
-      <InputToolbar
-        {...props}
-        containerStyle={{
-          backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
-          borderTopWidth: 1,
-          borderTopColor: colors.border,
-          paddingHorizontal: 6,
-        }}
-        primaryStyle={{ alignItems: 'center' }}
-      />
+      <View style={[styles.mentionSuggestions, { 
+        backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#FFFFFF',
+        borderColor: colors.border,
+        bottom: 50, // Adjusted to be closer to the input
+        position: 'absolute',
+        zIndex: 2
+      }]}>
+        <FlatList
+          data={mentionSuggestions}
+          keyExtractor={item => item.id}
+          keyboardShouldPersistTaps="always"
+          renderItem={({ item }) => (
+            <TouchableOpacity 
+              style={styles.mentionItem}
+              onPress={() => handleSelectMention(item)}
+            >
+              <Image 
+                source={{ uri: item.avatar || 'https://via.placeholder.com/32' }} 
+                style={styles.mentionAvatar}
+              />
+              <Text style={[styles.mentionUsername, { color: colors.text }]}>
+                @{item.username}
+              </Text>
+            </TouchableOpacity>
+          )}
+          ListEmptyComponent={
+            mentionLoading ? (
+              <ActivityIndicator color={colors.primary} size="small" />
+            ) : (
+              <Text style={[styles.emptyMention, { color: colors.secondaryText }]}>
+                No users found
+              </Text>
+            )
+          }
+        />
+      </View>
     );
   };
   
-  // Format recording time
-  const formatTime = (seconds: number): string => {
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
-  };
-  
-  // Custom composer component
+  // Improve the input and composer styling
   const renderComposer = (props: any) => {
     return (
       <Composer
         {...props}
-        textInputStyle={{
-          color: colors.text,
-          backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#FFFFFF',
-          borderRadius: 18,
-          paddingHorizontal: 12,
-          paddingTop: 8,
-          paddingBottom: 8,
-          marginRight: 6,
-          marginLeft: 6,
-          minHeight: 38,
+        text={currentTextInput}
+        onTextChanged={handleInputTextChanged}
+        textInputStyle={[
+          styles.inputText,
+          { 
+            color: colors.text,
+            backgroundColor: colorScheme === 'dark' ? '#2A2A2C' : '#FFFFFF',
+            fontFamily: 'Inter',
+          }
+        ]}
+        // The line below is to use our custom state
+        textInputProps={{
+          ...props.textInputProps,
+          onChangeText: handleInputTextChanged,
+          value: currentTextInput,
+          selectionColor: colors.primary,
+          placeholderTextColor: colorScheme === 'dark' ? '#6E6E72' : '#A9A9AD',
         }}
-        placeholder="Message"
-        placeholderTextColor={colors.secondaryText}
       />
     );
   };
@@ -1093,11 +1282,25 @@ export default function ChannelScreen() {
       >
         {/* Show Mic icon if no text, Send icon if text */}
         {props.text.trim().length > 0 ? (
-          <View style={[styles.sendButtonContainer, { backgroundColor: colors.primary }]}>
+          <View style={[styles.sendButtonContainer, { 
+            backgroundColor: colors.primary,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 1 },
+            shadowOpacity: 0.2,
+            shadowRadius: 1.5,
+            elevation: 2,
+          }]}>
             <Ionicons name="send" size={18} color="white" />
           </View>
         ) : (
-          <View style={styles.sendButtonContainer}> 
+          <View style={[
+            styles.sendButtonContainer,
+            { 
+              backgroundColor: colorScheme === 'dark' ? '#333333' : '#F5F5F7',
+              borderColor: colorScheme === 'dark' ? '#444444' : '#E5E5EA',
+              borderWidth: 1,
+            }
+          ]}> 
             <Ionicons name="mic" size={22} color={colors.primary} />
           </View>
         )}
@@ -1105,26 +1308,48 @@ export default function ChannelScreen() {
     );
   };
   
-  // Render actions button (attachments, etc)
-  const renderActions = (props: any) => {
+  // Custom input toolbar
+  const renderInputToolbar = (props: any) => {
     return (
-      <Actions
-        {...props}
-        containerStyle={styles.actionsContainer}
-        icon={() => (
-          <View style={styles.actionsIconContainer}>
-            <Ionicons name="add-circle" size={24} color={colors.primary} />
-          </View>
-        )}
-        options={{
-          'Send Image': handlePickImage,
-          'Record Audio': startRecording,
-          'Cancel': () => {},
-        }}
-        optionTintColor={colors.primary}
-        wrapperStyle={styles.actionsWrapper}
-      />
+      <View style={{ flex: 1, marginBottom: 0, paddingBottom: 0, position: 'relative' }}>
+        {/* Position mention suggestions right above the input */}
+        {mentionSuggestions.length > 0 && renderMentionSuggestions()}
+        <InputToolbar
+          {...props}
+          containerStyle={[
+            styles.inputToolbar,
+            { 
+              backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
+              borderTopColor: colors.border,
+              marginBottom: 0,
+              paddingBottom: 0,
+              paddingTop: 0,
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0
+            }
+          ]}
+          primaryStyle={{
+            alignItems: 'center',
+            marginBottom: 0,
+            paddingBottom: 0,
+            paddingTop: 0,
+            minHeight: 44
+          }}
+          accessoryStyle={{
+            height: recording.isRecording ? 70 : 0
+          }}
+        />
+      </View>
     );
+  };
+  
+  // Format recording time
+  const formatTime = (seconds: number): string => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
   
   // Custom render for messages with audio content
@@ -1605,7 +1830,16 @@ export default function ChannelScreen() {
       (async () => {
         try {
           console.log(`[ChannelScreen] Setting up live subscription for channel ${id}`);
+          
+          // Set up subscription for real-time updates
           unsub = await subscribeToChannel(id as string, async (newMsgs) => {
+            console.log(`[ChannelScreen] Received ${newMsgs.length} new messages from subscription`);
+            
+            // Log the sender IDs to debug
+            if (newMsgs.length > 0) {
+              console.log(`[ChannelScreen] Message sender IDs: ${newMsgs.map(m => m.user._id).join(', ')}`);
+            }
+            
             // Extract user IDs from the new messages
             const userIds = newMsgs
               .map(msg => msg.user._id.toString())
@@ -1624,8 +1858,8 @@ export default function ChannelScreen() {
                   ...msg,
                   user: {
                     ...msg.user,
-                    name: profile.username || msg.user.name,
-                    avatar: profile.profile_pic || msg.user.avatar
+                    name: profile.username || msg.user.name || 'Unknown User',
+                    avatar: profile.profile_pic || msg.user.avatar || ''
                   }
                 };
               }
@@ -1633,8 +1867,26 @@ export default function ChannelScreen() {
               return msg;
             });
             
-            // Append the enriched messages to the existing ones
-            setMessages(prev => GiftedChat.append(prev, enrichedNewMsgs));
+            // With Supabase Realtime, we need to handle messages differently
+            // Each message should be added to the state
+            setMessages(prev => {
+              // Create a map of existing messages by ID for faster lookup
+              const existingMsgs = new Map(prev.map(m => [m._id, m]));
+              
+              // Add any new messages not already in the list
+              enrichedNewMsgs.forEach(msg => {
+                if (!existingMsgs.has(msg._id)) {
+                  existingMsgs.set(msg._id, msg);
+                }
+              });
+              
+              // Convert back to array and sort by date (newest first for GiftedChat)
+              const sorted = Array.from(existingMsgs.values())
+                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+              
+              console.log(`[ChannelScreen] Updated messages: now have ${sorted.length} total`);
+              return sorted;
+            });
           });
         } catch (e) {
           console.error('[ChannelScreen] Failed to setup subscription:', e);
@@ -1671,10 +1923,14 @@ export default function ChannelScreen() {
   }, [id, user]);
 
   return (
-    <SafeAreaView
+    <View
       style={[
         styles.container,
-        { backgroundColor: colorScheme === 'dark' ? '#000000' : '#FFFFFF', paddingTop: insets.top },
+        { 
+          backgroundColor: colorScheme === 'dark' ? '#000000' : '#FFFFFF',
+          paddingTop: insets.top,
+          paddingBottom: 0
+        },
       ]}
     >
       <StatusBar barStyle={colorScheme === 'dark' ? 'light-content' : 'dark-content'} />
@@ -1724,68 +1980,158 @@ export default function ChannelScreen() {
           <ActivityIndicator size="large" color={colors.primary} />
         </View>
       ) : (
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={styles.flex}
-        >
-          <GiftedChat
-            messages={messages}
-            onSend={onSend}
-            user={{
-              _id: user?.id || '',
-              name: user?.username || '',
-              avatar: user?.profile_pic || '',
+        <View style={[styles.flex, { paddingBottom: 0, marginBottom: 0 }]}>
+          {/* Custom Messages Container */}
+          <FlatList
+            data={messages}
+            keyExtractor={item => item._id.toString()}
+            renderItem={({ item }) => {
+              const messageProps = {
+                currentMessage: item,
+                nextMessage: undefined,
+                previousMessage: undefined,
+                position: item.user._id === user?.id ? 'right' : 'left',
+                user: {
+                  _id: user?.id || '',
+                  name: user?.username || '',
+                  avatar: user?.profile_pic || '',
+                }
+              };
+              
+              return (
+                <View style={[
+                  styles.messageContainer,
+                  item.user._id === user?.id ? styles.userMessageContainer : styles.otherMessageContainer
+                ]}>
+                  {item.user._id !== user?.id && renderAvatar(messageProps)}
+                  <View style={{flex: 1}}>
+                    {renderCustomView(messageProps)}
+                    {renderBubble(messageProps)}
+                  </View>
+                </View>
+              );
             }}
-            renderBubble={renderBubble}
-            renderMessageText={renderMessageText}
-            renderDay={renderDay}
-            renderInputToolbar={renderInputToolbar}
-            renderComposer={renderComposer}
-            renderSend={renderSend}
-            renderActions={renderActions}
-            renderMessageAudio={renderMessageAudio}
-            renderMessageImage={renderMessageImage}
-            renderMessageVideo={renderMessageVideo}
-            renderAvatar={renderAvatar}
-            renderCustomView={renderCustomView}
-            renderAccessory={renderAccessory}
-            isLoadingEarlier={isLoading}
-            onLongPress={handleLongPressMessage}
-            showUserAvatar
-            renderAvatarOnTop
-            showAvatarForEveryMessage
-            renderUsernameOnMessage
-            alwaysShowSend
-            scrollToBottomComponent={() => (
-              <View style={{
-                backgroundColor: colors.primary,
-                width: 36, 
-                height: 36,
-                borderRadius: 18,
-                justifyContent: 'center',
-                alignItems: 'center',
-              }}>
-                <Ionicons name="chevron-down" size={24} color="white" />
+            inverted={true}
+            contentContainerStyle={{
+              flexGrow: 1,
+              paddingBottom: 0,
+              marginBottom: 0,
+            }}
+            style={{
+              flex: 1,
+              marginBottom: 0,
+              paddingBottom: 0,
+            }}
+            showsVerticalScrollIndicator={false}
+            onEndReached={() => {
+              // You can implement loading more messages here if needed
+              console.log("Reached end of messages");
+            }}
+            onEndReachedThreshold={0.1}
+            initialNumToRender={15}
+            maxToRenderPerBatch={10}
+            windowSize={10}
+          />
+          
+          {/* Custom Input Bar */}
+          <View style={[styles.inputContainer, { 
+            backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
+            borderTopColor: colors.border,
+          }]}>
+            {mentionSuggestions.length > 0 && renderMentionSuggestions()}
+            
+            <View style={styles.inputRow}>
+              {/* Attachment Button */}
+              <TouchableOpacity 
+                style={styles.attachButton}
+                onPress={handlePickImage}
+              >
+                <Ionicons name="attach" size={24} color={colors.primary} />
+              </TouchableOpacity>
+              
+              {/* Text Input */}
+              <View style={[
+                styles.textInputContainer, 
+                { backgroundColor: colorScheme === 'dark' ? '#2A2A2C' : '#FFFFFF' }
+              ]}>
+                <TextInput
+                  style={[
+                    styles.textInput,
+                    { color: colors.text }
+                  ]}
+                  placeholder="Type a message... Use @ to mention"
+                  placeholderTextColor={colorScheme === 'dark' ? '#6E6E72' : '#A9A9AD'}
+                  multiline
+                  value={currentTextInput}
+                  onChangeText={handleInputTextChanged}
+                  selectionColor={colors.primary}
+                />
+              </View>
+              
+              {/* Send Button */}
+              <TouchableOpacity 
+                style={[
+                  styles.sendButton,
+                  {backgroundColor: currentTextInput.trim().length > 0 ? colors.primary : '#A0A0A8'}
+                ]} 
+                onPress={() => {
+                  if (currentTextInput.trim().length > 0) {
+                    const messages = [{
+                      _id: Date.now().toString(),
+                      text: currentTextInput,
+                      createdAt: new Date(),
+                      user: {
+                        _id: user?.id || '',
+                        name: user?.username || '',
+                        avatar: user?.profile_pic || '',
+                      },
+                    }];
+                    onSend(messages);
+                  }
+                }}
+                disabled={currentTextInput.trim().length === 0}
+              >
+                <Ionicons name="send" size={18} color="white" />
+              </TouchableOpacity>
+            </View>
+            
+            {/* Recording UI */}
+            {recording.isRecording && (
+              <View style={styles.recordingContainer}>
+                <View style={styles.recordingInfo}>
+                  <View style={styles.recordingIndicator} />
+                  <Text style={[styles.recordingText, { color: colors.text }]}>
+                    Recording: {formatTime(recording.recordingDuration)}
+                  </Text>
+                </View>
+                <View style={styles.recordingActions}>
+                  <TouchableOpacity style={styles.cancelButton} onPress={cancelRecording}>
+                    <Text style={styles.cancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={[styles.sendButton, { backgroundColor: colors.primary }]} 
+                    onPress={sendAudioMessage}
+                  >
+                    <Text style={{ color: 'white', fontWeight: 'bold' }}>Send</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
-            infiniteScroll
-            keyboardShouldPersistTaps="handled"
-            bottomOffset={insets.bottom}
-            maxInputLength={1000}
-            placeholder="Type a message..."
-          />
-        </KeyboardAvoidingView>
+          </View>
+        </View>
       )}
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    paddingBottom: 0,
   },
   flex: {
     flex: 1,
+    paddingBottom: 0,
   },
   backBtn: {
     position: 'absolute',
@@ -1909,10 +2255,11 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   sendButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: '#007AFF',
-    borderRadius: 16,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   sendText: {
     color: 'white',
@@ -2236,6 +2583,110 @@ const styles = StyleSheet.create({
   messageVideo: {
     width: 200,
     height: 150,
+  },
+  // Mention system styles
+  mentionSuggestions: {
+    position: 'absolute',
+    bottom: 50, // Adjusted to be closer to the input
+    left: 8,
+    right: 8,
+    maxHeight: 200,
+    borderWidth: 1,
+    borderRadius: 12,
+    zIndex: 2,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  mentionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderBottomWidth: 0.5,
+    borderBottomColor: '#EEEEEE',
+  },
+  mentionAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    marginRight: 12,
+  },
+  mentionUsername: {
+    fontSize: 14,
+    fontWeight: '500',
+    fontFamily: 'Inter-Medium',
+  },
+  emptyMention: {
+    padding: 14,
+    textAlign: 'center',
+    fontFamily: 'Inter',
+  },
+  inputText: {
+    fontFamily: 'Inter',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 10,
+    marginRight: 6,
+    marginLeft: 6,
+    minHeight: 40,
+    maxHeight: 100,
+  },
+  inputToolbar: {
+    borderTopWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 0,
+    paddingBottom: 0,
+    marginBottom: 0,
+    marginTop: 0,
+  },
+  messageContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginVertical: 4,
+    paddingHorizontal: 10,
+  },
+  userMessageContainer: {
+    justifyContent: 'flex-end',
+  },
+  otherMessageContainer: {
+    justifyContent: 'flex-start',
+  },
+  inputContainer: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.1)',
+    paddingTop: 0,
+    paddingBottom: 0,
+    marginTop: 0,
+    marginBottom: 0,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 8,
+  },
+  attachButton: {
+    padding: 8,
+    marginRight: 8,
+  },
+  textInputContainer: {
+    flex: 1,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginRight: 8,
+  },
+  textInput: {
+    flex: 1,
+    fontFamily: 'Inter',
+    fontSize: 15,
+    maxHeight: 100,
+  },
+  gray: {
+    backgroundColor: '#A0A0A8',
   },
 });
 
