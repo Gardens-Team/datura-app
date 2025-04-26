@@ -572,7 +572,7 @@ export async function subscribeToChannel(
         try {
           const db = await ensureLocalStorage();
           await db.runAsync(
-            `INSERT OR REPLACE INTO messages (id,ciphertext,created_at,channel_id,garden_id,sender_id,message_type,nonce,sync_status)
+            `INSERT OR IGNORE INTO messages (id,ciphertext,created_at,channel_id,garden_id,sender_id,message_type,nonce,sync_status)
              VALUES (?,?,?,?,?,?,?,?,?)`,
             [
               row.id,

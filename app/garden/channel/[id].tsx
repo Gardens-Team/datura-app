@@ -20,6 +20,7 @@ import {
   Animated,
   FlatList,
   TextInput,
+  LayoutAnimation,
 } from 'react-native';
 import {
   GiftedChat,
@@ -59,6 +60,9 @@ import * as Sharing from 'expo-sharing';
 import AdminNotification from '@/components/AdminNotification';
 import { useTheme } from '@react-navigation/native';
 import ParsedText from 'react-native-parsed-text';
+import * as Crypto from 'expo-crypto';
+import * as MediaLibrary from 'expo-media-library';
+import { getLinkPreview /* LinkPreviewResponse (use any) */ } from 'link-preview-js'; // Import the library
 
 // Custom interface for the recording state
 interface RecordingState {
@@ -106,6 +110,110 @@ interface GardenMember {
     profile_pic: string;
   } | null;
 }
+
+// --- Link Preview Component ---
+interface LinkPreviewProps {
+  url: string;
+}
+
+// Define a simple type for the preview data, or use 'any'
+interface PreviewData {
+  url?: string;
+  title?: string;
+  description?: string;
+  images?: string[];
+  // Add other potential fields from link-preview-js if needed
+}
+
+function LinkPreview({ url }: LinkPreviewProps) {
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null); // Use defined type or any
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const colorScheme = useColorScheme();
+  const colors = Colors[colorScheme ?? 'light'];
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchPreview = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        // Important: Client-side fetching might fail due to CORS
+        const data = await getLinkPreview(url, {
+           headers: { // Add headers to potentially mimic browser
+             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
+             'Accept-Language': 'en-US,en;q=0.9',
+             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+           },
+           timeout: 5000 // 5 second timeout
+        });
+        if (isMounted) {
+          setPreviewData(data);
+        }
+      } catch (e: any) {
+        console.warn(`[LinkPreview] Failed for ${url}:`, e.message || e);
+        if (isMounted) {
+           // Handle specific errors if needed, e.g., e.message contains 'CORS'
+           setError('Could not load preview');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchPreview();
+
+    return () => {
+      isMounted = false; // Prevent state updates on unmounted component
+    };
+  }, [url]);
+
+  const handlePress = () => {
+    Linking.openURL(url).catch(err => console.error("Couldn't load page", err));
+  };
+
+  if (loading) {
+    return (
+      <View style={[styles.linkPreviewContainer, { backgroundColor: colors.background + '80'}]}>
+        <ActivityIndicator size="small" color={colors.primary} />
+        <Text style={[styles.linkPreviewUrl, { color: colors.secondaryText }]}>Loading preview...</Text>
+      </View>
+    );
+  }
+
+  if (error || !previewData || (!previewData.title && !previewData.description)) {
+    // Fallback: Don't render anything here, the link is already in the main text
+    // Optionally, render a small error indicator?
+    return null; 
+  }
+
+  // Render the preview "bubble"
+  return (
+    <TouchableOpacity onPress={handlePress} style={[styles.linkPreviewContainer, { backgroundColor: colors.border + '30' }]}>
+      {previewData.images && previewData.images.length > 0 && (
+        <Image source={{ uri: previewData.images[0] }} style={styles.linkPreviewImage} resizeMode="cover" />
+      )}
+      <View style={styles.linkPreviewTextContainer}>
+        {previewData.title && (
+          <Text style={[styles.linkPreviewTitle, { color: colors.text }]} numberOfLines={2}>
+            {previewData.title}
+          </Text>
+        )}
+        {previewData.description && (
+          <Text style={[styles.linkPreviewDescription, { color: colors.secondaryText }]} numberOfLines={3}>
+            {previewData.description}
+          </Text>
+        )}
+        <Text style={[styles.linkPreviewUrl, { color: colors.secondaryText }]} numberOfLines={1}>
+           {previewData.url || url} // Display the URL from preview data or the original
+        </Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+// --- End Link Preview Component ---
 
 // Custom MessageAudio component since it's not exported from gifted-chat
 const MessageAudio = ({ currentMessage, audioStyle }: { currentMessage: IMessage, audioStyle?: any }) => {
@@ -240,6 +348,7 @@ export default function ChannelScreen() {
   const [messages, setMessages] = useState<IMessage[]>([]);
   const [groupKey, setGroupKey] = useState<string | null>(null);
   const [inputText, setInputText] = useState('');
+  const [inputHeight, setInputHeight] = useState(36); // Initial composer height
   const [isLoading, setIsLoading] = useState(true);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [channel, setChannel] = useState<ChannelWithDescription | null>(null);
@@ -269,6 +378,9 @@ export default function ChannelScreen() {
   const recordingTimer = useRef<NodeJS.Timeout | null>(null);
 
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [channelLocked, setChannelLocked] = useState(false);
   const [replyTo, setReplyTo] = useState<IMessage | null>(null);
   const [profileModalVisible, setProfileModalVisible] = useState(false);
@@ -286,6 +398,9 @@ export default function ChannelScreen() {
   const [currentTextInput, setCurrentTextInput] = useState('');
   const [mentionedUsers, setMentionedUsers] = useState<string[]>([]);
   const [mentionStartIndex, setMentionStartIndex] = useState<number>(-1);
+
+  // Add a ref for the text input
+  const textInputRef = useRef<TextInput>(null);
 
   // Fetch channel and garden info
   useEffect(() => {
@@ -675,7 +790,7 @@ export default function ChannelScreen() {
       
       // Create the message with audio content
       const audioMessage: ExtendedMessage = {
-        _id: String(Date.now()),
+        _id: Crypto.randomUUID(),
         text: '',
         createdAt: new Date(),
         user: {
@@ -745,7 +860,7 @@ export default function ChannelScreen() {
         
         // Create and send the message
         const imageMessage: ExtendedMessage = {
-          _id: String(Date.now()),
+          _id: Crypto.randomUUID(),
           text: '',
           createdAt: new Date(),
           user: {
@@ -799,14 +914,15 @@ export default function ChannelScreen() {
   }, [channelUsers, isAdminUser, user]);
 
   // Wrap bubble to handle long press
-  const renderBubbleWithLongPress = (props: any) => (
-    <TouchableOpacity
-      activeOpacity={0.8}
-      onLongPress={() => handleLongPressMessage(props, props.currentMessage)}
-    >
-      <Bubble {...props} />
-    </TouchableOpacity>
-  );
+  // REMOVE renderBubbleWithLongPress as bubbles are removed
+  // const renderBubbleWithLongPress = (props: any) => (
+  //   <TouchableOpacity
+  //     activeOpacity={0.8}
+  //     onLongPress={() => handleLongPressMessage(props, props.currentMessage)}
+  //   >
+  //     <Bubble {...props} />
+  //   </TouchableOpacity>
+  // );
 
   // Render reply preview above composer
   const renderAccessory = () => replyTo ? (
@@ -1049,136 +1165,128 @@ export default function ChannelScreen() {
     );
   };
 
-  // Replace the renderMessageText function to use Inter font and highlight mentions
+  // Process text with quotes - ensure line is properly typed
+  const processQuotes = (text: string) => {
+    if (!text) return [];
+    
+    const lines = text.split('\n');
+    const result: { text: string; isQuote: boolean }[] = [];
+    
+    lines.forEach((line: string) => {
+      const quoteMatch = line.match(/^\s*>\s?(.*)/);
+      if (quoteMatch) {
+        result.push({ text: quoteMatch[1], isQuote: true });
+      } else {
+        result.push({ text: line, isQuote: false });
+      }
+    });
+    
+    return result;
+  };
+
+  // --- Render Message Text --- 
   const renderMessageText = (props: any) => {
     const { currentMessage } = props;
+    const textColor = colors.text;
+    const mentionColor = colors.primary;
+    const linkColor = colors.primary;
     
-    // If we have mentioned users, use ParsedText to highlight mentions
-    if (currentMessage.mentioned_users && currentMessage.mentioned_users.length > 0) {
-      // Get usernames for the mentioned user IDs
-      const mentionedUsers = currentMessage.mentioned_users
-        .map((userId: string) => {
-          const user = channelUsers.find(u => u.id === userId);
-          return user ? user.username : null;
-        })
-        .filter(Boolean);
-        
-      if (mentionedUsers.length > 0) {
-        // Create a pattern to match @username where username is any of the mentioned users
-        const mentionPattern = new RegExp(`@(${mentionedUsers.join('|')})\\b`, 'g');
-        
-        return (
-          <View style={{ flex: 1 }}>
-            <ParsedText
-              style={{
-                fontFamily: 'Inter',
-                fontSize: 15,
-                lineHeight: 20,
-                color: props.position === 'left' ? colors.text : 'white',
-              }}
-              parse={[
-                { 
-                  pattern: mentionPattern, 
-                  style: { 
-                    color: colors.primary, 
-                    fontWeight: 'bold',
-                  }, 
-                  onPress: (match: string, index: number) => {
-                    // Extract username from the match removing the @ symbol
-                    const username = match.substring(1); // Remove @ prefix
-                    const userWithUsername = channelUsers.find(u => u.username === username);
-                    if (userWithUsername) {
-                      setProfileUser(userWithUsername);
-                      setProfileModalVisible(true);
+    // Extract URL for potential preview rendering
+    const detectedUrl = extractUrl(currentMessage.text);
+
+    // Get lines that are quotes (start with >)
+    const lines = currentMessage.text.split('\n');
+    const hasQuotes = lines.some((line: string) => /^\s*>\s/.test(line));
+
+    // Process text with quotes
+    const processedText = processQuotes(currentMessage.text);
+
+    if (hasQuotes) {
+      // Render with custom quote blocks
+      return (
+        <View> 
+          {processedText.map((item, index) => (
+            <View key={index} style={componentStyles.quoteContainer}>
+              <ParsedText
+                style={[
+                  { 
+                    fontFamily: 'Inter',
+                    fontSize: 15,
+                    lineHeight: 20,
+                    color: textColor,
+                  },
+                  item.isQuote ? { color: colors.secondaryText } : {}
+                ]}
+                parse={[
+                  { // Mention highlighting
+                    pattern: /@(\w+)/, 
+                    style: { color: mentionColor, fontWeight: 'bold' },
+                    onPress: (match: string) => {
+                      const username = match.substring(1); 
+                      const mentionedUser = channelUsers.find(u => u.username === username);
+                      if (mentionedUser) {
+                        setProfileUser(mentionedUser);
+                        setProfileModalVisible(true);
+                      }
                     }
-                  }
-                },
-                // Handle links too
-                {
-                  type: 'url',
-                  style: { color: props.position === 'left' ? colors.primary : 'rgba(255, 255, 255, 0.9)' },
-                }
-              ]}
-            >
-              {currentMessage.text}
-            </ParsedText>
-          </View>
-        );
-      }
+                  },
+                  { // Link styling (make clickable)
+                    type: 'url',
+                    style: { color: linkColor, textDecorationLine: 'underline' },
+                    onPress: (url: string) => Linking.openURL(url).catch(err => console.error("Couldn't load page", err)),
+                  },
+                ]}
+              >
+                {item.text}
+              </ParsedText>
+            </View>
+          ))}
+          
+          {/* Conditionally render the LinkPreview component below the text */}
+          {detectedUrl && <LinkPreview url={detectedUrl} />}
+        </View>
+      );
     }
-    
-    // Otherwise use the standard MessageText for messages without mentions
+
+    // Default rendering for messages without quotes
     return (
-      <MessageText
-        {...props}
-        textStyle={{
-          left: {
+      <View> 
+        <ParsedText
+          style={{ // Basic text style
             fontFamily: 'Inter',
             fontSize: 15,
             lineHeight: 20,
-            color: colors.text,
-          },
-          right: {
-            fontFamily: 'Inter',
-            fontSize: 15,
-            lineHeight: 20,
-            color: 'white',
-          },
-        }}
-        linkStyle={{
-          left: { color: colors.primary },
-          right: { color: 'rgba(255, 255, 255, 0.9)' },
-        }}
-        customTextStyle={{ 
-          fontFamily: 'Inter',
-        }}
-      />
+            color: textColor,
+          }}
+          parse={[
+            { // Mention highlighting
+              pattern: /@(\w+)/, 
+              style: { color: mentionColor, fontWeight: 'bold' },
+              onPress: (match: string) => {
+                const username = match.substring(1); 
+                const mentionedUser = channelUsers.find(u => u.username === username);
+                if (mentionedUser) {
+                  setProfileUser(mentionedUser);
+                  setProfileModalVisible(true);
+                }
+              }
+            },
+            { // Link styling (make clickable)
+              type: 'url',
+              style: { color: linkColor, textDecorationLine: 'underline' },
+              onPress: (url: string) => Linking.openURL(url).catch(err => console.error("Couldn't load page", err)),
+            },
+          ]}
+        >
+          {currentMessage.text}
+        </ParsedText>
+        
+        {/* Conditionally render the LinkPreview component below the text */}
+        {detectedUrl && <LinkPreview url={detectedUrl} />}
+      </View>
     );
   };
 
-  // Improve the bubble styling
-  const renderBubble = (props: any) => {
-    return (
-      <Bubble
-        {...props}
-        wrapperStyle={{
-          left: {
-            backgroundColor: colorScheme === 'dark' ? '#2C2C2E' : '#F2F2F7',
-            borderRadius: 18,
-            marginBottom: 4,
-            marginLeft: 0,
-            marginRight: 60,
-            paddingVertical: 8,
-            paddingHorizontal: 14,
-            shadowColor: '#000',
-            shadowOffset: { width: 0, height: 1 },
-            shadowOpacity: colorScheme === 'dark' ? 0.2 : 0.08,
-            shadowRadius: 1,
-            elevation: 1,
-          },
-          right: {
-            backgroundColor: colors.primary,
-            borderRadius: 18,
-            marginBottom: 4,
-            marginLeft: 60,
-            paddingVertical: 8,
-            paddingHorizontal: 14,
-            shadowColor: '#000',
-            shadowOffset: { width: 0, height: 1 },
-            shadowOpacity: 0.1,
-            shadowRadius: 1,
-            elevation: 1,
-          },
-        }}
-        tickStyle={{ color: colors.secondaryText }}
-        textStyle={{
-          left: { fontFamily: 'Inter', color: colors.text },
-          right: { fontFamily: 'Inter', color: 'white' },
-        }}
-      />
-    );
-  };
-  
   // Custom day separator
   const renderDay = (props: any) => {
     return (
@@ -1240,29 +1348,98 @@ export default function ChannelScreen() {
     );
   };
   
-  // Improve the input and composer styling
+  // Custom composer with interactive quote rendering
   const renderComposer = (props: any) => {
+    // Process text to detect quotes for interactive rendering
+    const processInputWithQuotes = (text: string) => {
+      if (!text) return [];
+      
+      const lines = text.split('\n');
+      const result: { text: string; isQuote: boolean }[] = [];
+      
+      lines.forEach((line: string) => {
+        const quoteMatch = line.match(/^\s*>\s?(.*)/);
+        if (quoteMatch) {
+          result.push({ text: line, isQuote: true });
+        } else {
+          result.push({ text: line, isQuote: false });
+        }
+      });
+      
+      return result;
+    };
+
+    const processedInput = processInputWithQuotes(inputText);
+    const hasQuotes = processedInput.some(item => item.isQuote);
+
+    // Use interactive input with quote rendering
+    if (hasQuotes) {
+      return (
+        <View style={componentStyles.composerContainer}>
+          <View style={componentStyles.composerInputWrapper}>
+            <ScrollView style={{ maxHeight: Math.min(120, inputHeight) }}>
+              {processedInput.map((item, index) => (
+                <View key={index} style={item.isQuote ? componentStyles.inputQuoteContainer : {}}>
+                  <Text style={[
+                    componentStyles.composerText,
+                    item.isQuote ? componentStyles.inputQuoteText : {}
+                  ]}>
+                    {item.text}
+                  </Text>
+                </View>
+              ))}
+              <TextInput
+                ref={textInputRef}
+                style={[
+                  componentStyles.hiddenTextInput,
+                  { height: Math.max(36, inputHeight) }
+                ]}
+                value={inputText}
+                onChangeText={(text) => {
+                  setInputText(text);
+                  props.onTextChanged(text);
+                  
+                  // Animate height changes
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                }}
+                onContentSizeChange={(e) => {
+                  setInputHeight(Math.max(36, Math.min(120, e.nativeEvent.contentSize.height)));
+                }}
+                multiline={true}
+                placeholder="Type a message..."
+                placeholderTextColor={colors.secondaryText}
+                {...props}
+              />
+            </ScrollView>
+          </View>
+        </View>
+      );
+    }
+
+    // Default composer for non-quote text
     return (
-      <Composer
-        {...props}
-        text={currentTextInput}
-        onTextChanged={handleInputTextChanged}
-        textInputStyle={[
-          styles.inputText,
+      <TextInput
+        ref={textInputRef}
+        style={[
+          componentStyles.composerInput,
           { 
             color: colors.text,
-            backgroundColor: colorScheme === 'dark' ? '#2A2A2C' : '#FFFFFF',
-            fontFamily: 'Inter',
+            backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
+            height: Math.max(36, inputHeight) 
           }
         ]}
-        // The line below is to use our custom state
-        textInputProps={{
-          ...props.textInputProps,
-          onChangeText: handleInputTextChanged,
-          value: currentTextInput,
-          selectionColor: colors.primary,
-          placeholderTextColor: colorScheme === 'dark' ? '#6E6E72' : '#A9A9AD',
+        value={inputText}
+        onChangeText={(text) => {
+          setInputText(text);
+          props.onTextChanged(text);
         }}
+        onContentSizeChange={(e) => {
+          setInputHeight(Math.max(36, Math.min(120, e.nativeEvent.contentSize.height)));
+        }}
+        placeholder="Type a message..."
+        placeholderTextColor={colors.secondaryText}
+        multiline={true}
+        {...props}
       />
     );
   };
@@ -1375,24 +1552,27 @@ export default function ChannelScreen() {
       console.log('[Audio Renderer] Reformatted audio URL:', audioSource.substring(0, 30) + '...');
     }
     
+    // Define consistent styles independent of position
+    const audioBackgroundColor = colorScheme === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)';
+    const playButtonColor = colors.primary; // Use primary color for play button
+    const durationColor = colors.secondaryText; // Use secondary text color
+
     return (
       <MessageAudio
         currentMessage={{...props.currentMessage, audio: audioSource}}
         audioStyle={{
           container: {
-            backgroundColor: 'transparent',
+            backgroundColor: 'transparent', // Keep container transparent
             marginTop: 6,
           },
           wrapper: {
-            backgroundColor: props.position === 'left' 
-              ? (colorScheme === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)') 
-              : 'rgba(255,255,255,0.2)',
+            backgroundColor: audioBackgroundColor, // Use consistent background
             borderRadius: 12,
             paddingVertical: 6,
             paddingHorizontal: 10,
           },
           playPauseButton: {
-            backgroundColor: props.position === 'left' ? '#007AFF' : 'white',
+            backgroundColor: playButtonColor, // Use consistent play button color
             borderRadius: 20,
             width: 40,
             height: 40,
@@ -1402,7 +1582,7 @@ export default function ChannelScreen() {
           playIcon: { marginLeft: 2 },
           pauseIcon: {},
           duration: {
-            color: props.position === 'left' ? '#8E8E93' : 'rgba(255, 255, 255, 0.7)',
+            color: durationColor, // Use consistent duration color
             marginLeft: 10,
             fontSize: 13,
           },
@@ -1411,79 +1591,157 @@ export default function ChannelScreen() {
     );
   };
 
-  // Function to download/share media
+  // Function to download media directly to device
   async function handleDownload(uri: string, type: 'image' | 'video') {
     try {
+      setIsDownloading(true);
+      setDownloadProgress(0);
+      
+      // Show toast or alert that download is starting
+      Alert.alert("Download Started", `Downloading ${type}...`);
+      
       let base64Data = uri;
       // If data URI, strip prefix
       if (uri.startsWith('data:')) {
         base64Data = uri.split(',')[1];
       }
+      
+      const timestamp = Date.now();
       const ext = type === 'image' ? '.jpg' : '.mp4';
-      const filename = `media-${Date.now()}${ext}`;
-      const path = FileSystem.cacheDirectory + filename;
-      // Write base64 to file
-      await FileSystem.writeAsStringAsync(path, base64Data, { encoding: FileSystem.EncodingType.Base64 });
-      // Share it
-      await Sharing.shareAsync(path);
+      const filename = `gardens-${timestamp}${ext}`;
+      const fileDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+      const path = fileDir + filename;
+      
+      // Write base64 to file, tracking progress
+      await FileSystem.writeAsStringAsync(path, base64Data, { 
+        encoding: FileSystem.EncodingType.Base64 
+      });
+      
+      // Get permissions for media library
+      if (Platform.OS === 'ios') {
+        // For iOS, we save to Camera Roll
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert("Permission Denied", "Cannot save to your photo library without permission");
+          setIsDownloading(false);
+          return;
+        }
+        
+        // Save to Camera Roll
+        if (type === 'image') {
+          await MediaLibrary.saveToLibraryAsync(path);
+        } else {
+          await MediaLibrary.saveToLibraryAsync(path);
+        }
+        
+        Alert.alert(
+          "Download Complete", 
+          `${type === 'image' ? 'Image' : 'Video'} saved to your Photos`,
+          [{ text: "OK" }]
+        );
+      } else {
+        // For Android, we use MediaLibrary
+        const { status } = await MediaLibrary.requestPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert("Permission Denied", "Cannot save to your media library without permission");
+          setIsDownloading(false);
+          return;
+        }
+        
+        // Save file to media library
+        await MediaLibrary.saveToLibraryAsync(path);
+        
+        Alert.alert(
+          "Download Complete", 
+          `${type === 'image' ? 'Image' : 'Video'} saved to your gallery`,
+          [{ text: "OK" }]
+        );
+      }
+      
+      // Clean up the temp file
+      await FileSystem.deleteAsync(path, { idempotent: true });
+      
     } catch (e) {
       console.error('Download failed:', e);
       Alert.alert('Error', 'Failed to download media.');
+    } finally {
+      setIsDownloading(false);
     }
   }
 
   // Custom render for image messages
   const renderMessageImage = (props: any) => {
-    try {
-      const imageSource = props.currentMessage.image;
-      if (!imageSource) return null;
+    if (!props.currentMessage.image) return null;
 
-      return (
-        <View style={{ position: 'relative', marginVertical: 4 }}>
-          {/* Download button */}
-          <Pressable
-            style={{ position: 'absolute', top: 6, right: 6, zIndex: 2, padding: 4 }}
-            onPress={() => handleDownload(imageSource, 'image')}
-          >
-            <Ionicons name="download-outline" size={24} color="white" />
-          </Pressable>
+    // const isCurrentUser = props.currentMessage.user._id === user?.id;
 
-          {/* Image thumbnail with press to open */}
-          <Pressable onPress={() => setSelectedImage(imageSource)} style={styles.mediaContainer}> 
+    return (
+      <View style={styles.mediaWrapper}> 
+        <Pressable
+          onPress={() => {
+            setSelectedImage(props.currentMessage.image);
+          }}
+        >
+          {/* Use a single container style, remove user/other distinction */}
+          <View style={styles.mediaContainer}>
             <Image
-              source={{ uri: imageSource }}
-              style={styles.messageImage}
+              source={{ uri: props.currentMessage.image }}
+              style={styles.messageImage} // Ensure styles.messageImage is suitable
               resizeMode="cover"
             />
-          </Pressable>
-        </View>
-      );
-    } catch (e) {
-      console.warn('Image render error:', e);
-      return null;
-    }
+          </View>
+        </Pressable>
+        
+        {/* Keep download button logic (could be based on isCurrentUser if needed) */}
+        {/* Example: { !isCurrentUser && ( ... ) } */}
+        <TouchableOpacity
+          style={styles.mediaDownloadButton}
+          onPress={() => handleDownload(props.currentMessage.image, 'image')}
+        >
+          <View style={styles.downloadButtonInner}>
+            <Ionicons name="download-outline" size={18} color="white" />
+          </View>
+        </TouchableOpacity>
+      </View>
+    );
   };
 
   // Custom render for video messages
   const renderMessageVideo = (props: any) => {
     if (!props.currentMessage.video) return null;
-    const videoSource = props.currentMessage.video;
+
+    // const isCurrentUser = props.currentMessage.user._id === user?.id;
+
     return (
-      <View style={{ position: 'relative', marginVertical: 4 }}>
-        <TouchableOpacity
-          style={{ position: 'absolute', top: 6, right: 6, zIndex: 1 }}
-          onPress={() => handleDownload(videoSource, 'video')}
+      <View style={styles.mediaWrapper}>
+        <TouchableOpacity 
+          onPress={() => setSelectedVideo(props.currentMessage.video)}
+          // Use a single container style, remove user/other distinction
+          style={styles.mediaContainer} 
         >
-          <Ionicons name="download-outline" size={24} color="white" />
-        </TouchableOpacity>
-        <Pressable onPress={() => {/* TODO: Open video player? */}} style={styles.mediaContainer}>
           <Video
-            source={{ uri: videoSource }}
-            style={styles.messageVideo}
-            useNativeControls
+            source={{ uri: props.currentMessage.video }}
+            style={styles.messageVideo} // Ensure styles.messageVideo is suitable
             resizeMode={ResizeMode.COVER}
+            useNativeControls={false}
+            isLooping={false}
+            shouldPlay={false}
           />
-        </Pressable>
+          <View style={styles.videoPlayButton}>
+            <Ionicons name="play-circle" size={42} color="white" />
+          </View>
+        </TouchableOpacity>
+        
+        {/* Keep download button logic */}
+        {/* Example: { !isCurrentUser && ( ... ) } */}
+        <TouchableOpacity 
+          style={styles.mediaDownloadButton}
+          onPress={() => handleDownload(props.currentMessage.video, 'video')}
+        >
+          <View style={styles.downloadButtonInner}>
+            <Ionicons name="download-outline" size={18} color="white" />
+          </View>
+        </TouchableOpacity>
       </View>
     );
   };
@@ -1875,8 +2133,12 @@ export default function ChannelScreen() {
               
               // Add any new messages not already in the list
               enrichedNewMsgs.forEach(msg => {
+                // Check if we already have this message to avoid duplicates
                 if (!existingMsgs.has(msg._id)) {
+                  console.log(`[ChannelScreen] Adding new message: ${msg._id}`);
                   existingMsgs.set(msg._id, msg);
+                } else {
+                  console.log(`[ChannelScreen] Skipping duplicate message: ${msg._id}`);
                 }
               });
               
@@ -1922,6 +2184,93 @@ export default function ChannelScreen() {
     getKey();
   }, [id, user]);
 
+  // Slack style: Helper to check if the message is from the current user
+  const isCurrentUser = (message: IMessage) => message.user._id === user?.id;
+
+  // Slack style: Helper to get user profile (replace direct access if needed)
+  const getUserProfile = (userId: string) => userProfiles[userId] || {};
+
+  // Helper function to extract the first URL from text
+  const extractUrl = (text: string): string | null => {
+    if (!text) return null;
+    // Simple regex for URL detection (adjust as needed for more complex cases)
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const matches = text.match(urlRegex);
+    return matches ? matches[0] : null;
+  };
+
+  // Add styles for quote rendering inline at the component level
+  // Create a local function that returns styles using the current colors and colorScheme
+  const getComponentStyles = () => {
+    // Get fresh references to theme values
+    const currentColorScheme = colorScheme;
+    const currentColors = colors;
+
+    return {
+      quoteContainer: {
+        borderLeftWidth: 4,
+        borderLeftColor: currentColors.primary + '80',
+        backgroundColor: currentColorScheme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)',
+        paddingLeft: 10,
+        paddingVertical: 6,
+        borderRadius: 4,
+        marginVertical: 4,
+      },
+      composerContainer: {
+        flex: 1,
+        marginLeft: 8,
+        marginRight: 8,
+        marginBottom: 5,
+      },
+      composerInputWrapper: {
+        backgroundColor: currentColorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
+        borderRadius: 18,
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+        maxHeight: 120,
+      },
+      hiddenTextInput: {
+        position: 'absolute',
+        opacity: 0, 
+        left: 0,
+        right: 0,
+        top: 0,
+        height: '100%',
+      },
+      composerText: {
+        color: currentColors.text,
+        fontSize: 16,
+        lineHeight: 20,
+        fontFamily: 'Inter',
+      },
+      composerInput: {
+        flex: 1,
+        marginLeft: 8,
+        paddingHorizontal: 12,
+        paddingTop: 8,
+        paddingBottom: 8,
+        borderRadius: 18,
+        fontFamily: 'Inter',
+        fontSize: 16,
+      },
+      inputQuoteContainer: {
+        borderLeftWidth: 4,
+        borderLeftColor: currentColors.primary + '80',
+        backgroundColor: currentColorScheme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)',
+        paddingLeft: 10,
+        paddingVertical: 4,
+        borderRadius: 4,
+        marginVertical: 2,
+      },
+      inputQuoteText: {
+        color: currentColors.secondaryText,
+      },
+    };
+  };
+
+  // Generate the styles once
+  const componentStyles = getComponentStyles();
+
   return (
     <View
       style={[
@@ -1957,17 +2306,79 @@ export default function ChannelScreen() {
       {/* Render info dropdown box */}
       {renderInfoBox()}
       
+      {/* Image Viewer Modal */}
       {selectedImage && (
         <Modal visible transparent animationType="fade" onRequestClose={() => setSelectedImage(null)}>
           <View style={styles.imageModalOverlay}>
             <TouchableOpacity style={styles.imageModalClose} onPress={() => setSelectedImage(null)}>
               <Ionicons name="close-circle" size={36} color="white" />
             </TouchableOpacity>
+            
             <Image
               source={{ uri: selectedImage }}
               style={styles.imageModalImage}
               resizeMode="contain"
             />
+            
+            <TouchableOpacity 
+              style={styles.imageModalDownload} 
+              onPress={() => {
+                handleDownload(selectedImage, 'image');
+                setSelectedImage(null);
+              }}
+            >
+              <View style={styles.modalDownloadContainer}>
+                <Ionicons name="download-outline" size={24} color="white" />
+                <Text style={styles.modalDownloadText}>Save</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </Modal>
+      )}
+      
+      {/* Video Player Modal */}
+      {selectedVideo && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setSelectedVideo(null)}>
+          <View style={styles.imageModalOverlay}>
+            <TouchableOpacity style={styles.imageModalClose} onPress={() => setSelectedVideo(null)}>
+              <Ionicons name="close-circle" size={36} color="white" />
+            </TouchableOpacity>
+            
+            <Video
+              source={{ uri: selectedVideo }}
+              style={styles.videoModalPlayer}
+              useNativeControls
+              resizeMode={ResizeMode.CONTAIN}
+              isLooping
+              shouldPlay
+            />
+            
+            <TouchableOpacity 
+              style={styles.imageModalDownload} 
+              onPress={() => {
+                handleDownload(selectedVideo, 'video');
+                setSelectedVideo(null);
+              }}
+            >
+              <View style={styles.modalDownloadContainer}>
+                <Ionicons name="download-outline" size={24} color="white" />
+                <Text style={styles.modalDownloadText}>Save</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </Modal>
+      )}
+      
+      {/* Download Progress Modal */}
+      {isDownloading && (
+        <Modal transparent animationType="fade">
+          <View style={styles.downloadProgressOverlay}>
+            <View style={styles.downloadProgressContent}>
+              <ActivityIndicator size="large" color={colors.primary} />
+              <Text style={[styles.downloadProgressText, { color: colors.text }]}>
+                Downloading...
+              </Text>
+            </View>
           </View>
         </Modal>
       )}
@@ -1985,29 +2396,66 @@ export default function ChannelScreen() {
           <FlatList
             data={messages}
             keyExtractor={item => item._id.toString()}
-            renderItem={({ item }) => {
+            renderItem={({ item }): React.ReactElement | null => { // Ensure return type includes null
+              // System messages have their own renderer
+              if (item.user._id === 'system') {
+                const systemMessageElement = renderSystemMessage({ currentMessage: item });
+                // Directly return the element or null if it's not a valid element
+                return React.isValidElement(systemMessageElement) ? systemMessageElement : null;
+              }
+
               const messageProps = {
                 currentMessage: item,
-                nextMessage: undefined,
+                nextMessage: undefined, // Could potentially use next/prev messages for grouping like Slack later
                 previousMessage: undefined,
-                position: item.user._id === user?.id ? 'right' : 'left',
-                user: {
+                position: isCurrentUser(item) ? 'right' : 'left', // Add position back
+                user: { // Keep gifted-chat's user structure for compatibility
                   _id: user?.id || '',
                   name: user?.username || '',
                   avatar: user?.profile_pic || '',
-                }
+                },
+                // Remove position prop as it's not driving layout anymore
+                // position: isCurrentUser(item) ? 'right' : 'left',
               };
-              
+
+              const profile = getUserProfile(item.user._id.toString());
+
               return (
-                <View style={[
-                  styles.messageContainer,
-                  item.user._id === user?.id ? styles.userMessageContainer : styles.otherMessageContainer
-                ]}>
-                  {item.user._id !== user?.id && renderAvatar(messageProps)}
-                  <View style={{flex: 1}}>
-                    {renderCustomView(messageProps)}
-                    {renderBubble(messageProps)}
+                <View style={styles.slackMessageContainer}>
+                  {/* Avatar always on the left */}
+                  <View style={styles.slackAvatarWrapper}>
+                    {renderAvatar(messageProps)}
                   </View>
+
+                  {/* Content area */}
+                  <TouchableOpacity
+                    style={styles.slackContentWrapper}
+                    activeOpacity={0.8}
+                    onLongPress={() => handleLongPressMessage(null, item)} // Pass context=null or adjust handler
+                  >
+                    {/* Username/Timestamp Row (only for others) */}
+                    {!isCurrentUser(item) && (
+                      <View style={styles.slackHeaderRow}>
+                        <Text style={[styles.slackUsername, { color: colors.text }]}>
+                          {profile.username || item.user.name || 'User'}
+                        </Text>
+                        <Text style={[styles.slackTimestamp, { color: colors.secondaryText }]}>
+                          {/* Format timestamp - requires date-fns or similar */}
+                          {/* {format(new Date(item.createdAt), 'h:mm a')} */}
+                          {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                        </Text>
+                      </View>
+                    )}
+
+                    {/* Message Content (Text, Image, Video, Audio) */}
+                    <View style={styles.slackMessageContent}>
+                      {item.image ? renderMessageImage(messageProps) :
+                       item.video ? renderMessageVideo(messageProps) :
+                       item.audio ? renderMessageAudio(messageProps) :
+                       renderMessageText(messageProps) // Use MessageText directly
+                      }
+                    </View>
+                  </TouchableOpacity>
                 </View>
               );
             }}
@@ -2077,7 +2525,7 @@ export default function ChannelScreen() {
                 onPress={() => {
                   if (currentTextInput.trim().length > 0) {
                     const messages = [{
-                      _id: Date.now().toString(),
+                      _id: Crypto.randomUUID(),
                       text: currentTextInput,
                       createdAt: new Date(),
                       user: {
@@ -2395,6 +2843,30 @@ const styles = StyleSheet.create({
     right: 20,
     zIndex: 1003,
   },
+  imageModalDownload: {
+    position: 'absolute',
+    bottom: 40,
+    left: 20,
+    zIndex: 1003,
+  },
+  modalDownloadContainer: {
+    position: 'absolute',
+    bottom: 10,
+    left: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalDownloadText: {
+    color: 'white',
+    marginLeft: 8,
+    fontSize: 14,
+    fontWeight: '500',
+  },
   headerTitleContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2427,22 +2899,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   replyPreview: {
-    flexDirection: 'column',
-    padding: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(0,0,0,0.1)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    backgroundColor: '#f8f8f8',
+    borderTopWidth: 1,
+    borderTopColor: '#e0e0e0',
   },
   replyCancel: {
-    position: 'absolute',
-    top: 4,
-    right: 4,
+    padding: 8,
   },
   replyUsername: {
-    fontWeight: '600',
-    marginBottom: 4,
+    fontWeight: 'bold',
+    fontSize: 14,
+    marginBottom: 2,
   },
   replyText: {
-    marginTop: 4,
+    fontSize: 14,
+    color: '#555',
   },
   modalOverlay: {
     flex: 1,
@@ -2526,8 +3001,9 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
   avatarContainer: {
-    position: 'relative',
-    marginRight: 2,
+    marginRight: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   avatarImage: {
     width: 36,
@@ -2538,22 +3014,23 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    justifyContent: 'center',
+    backgroundColor: '#CCC',
     alignItems: 'center',
+    justifyContent: 'center',
   },
   avatarFallbackText: {
-    fontSize: 15,
-    fontWeight: '600',
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#FFF',
   },
   customView: {
-    marginTop: -4,
-    marginBottom: 4,
-    marginLeft: 6,
+    marginBottom: 2,
   },
   username: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontWeight: 'bold',
+    fontSize: 13,
     marginBottom: 2,
+    color: '#555',
   },
   replyIndicator: {
     flexDirection: 'row',
@@ -2569,20 +3046,73 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 2,
   },
+  mediaWrapper: {
+    position: 'relative',
+    marginVertical: 4,
+  },
   mediaContainer: {
     borderRadius: 13,
     overflow: 'hidden',
     marginTop: 4,
     marginBottom: 4,
   },
+  mediaDownloadButton: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    zIndex: 10,
+  },
+  downloadButtonInner: {
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  messageImageContainer: {
+    borderRadius: 18,
+    overflow: 'hidden',
+    marginVertical: 4,
+  },
+  userImageContainer: {
+    marginLeft: 60,
+    borderTopRightRadius: 4, // Flatter corner on user side
+  },
+  otherImageContainer: {
+    marginRight: 60,
+    borderTopLeftRadius: 4, // Flatter corner on other side
+  },
   messageImage: {
-    width: 200,
-    height: 150,
-    resizeMode: 'cover',
+    // Adjust size constraints if needed for Slack style
+    width: '100%', // Make image take available width in the container
+    aspectRatio: 16 / 9, // Maintain aspect ratio, adjust as needed
+    borderRadius: 8, // Slack uses softer corners
+    marginTop: 4, // Space below username/timestamp
   },
   messageVideo: {
-    width: 200,
-    height: 150,
+    // Adjust size constraints if needed for Slack style
+    width: '100%',
+    aspectRatio: 16 / 9,
+    borderRadius: 8,
+    marginTop: 4,
+  },
+  videoPlayButton: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 13,
+    overflow: 'hidden',
   },
   // Mention system styles
   mentionSuggestions: {
@@ -2687,6 +3217,95 @@ const styles = StyleSheet.create({
   },
   gray: {
     backgroundColor: '#A0A0A8',
+  },
+  videoModalPlayer: {
+    width: '100%',
+    height: '100%',
+  },
+  downloadProgressOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1005,
+  },
+  downloadProgressContent: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+    zIndex: 1006,
+  },
+  downloadProgressText: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  // Slack Style Message Structure
+  slackMessageContainer: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingVertical: 6, // Adjust vertical spacing
+    alignItems: 'flex-start',
+  },
+  slackAvatarWrapper: {
+    marginRight: 8,
+    paddingTop: 2, // Align avatar top with username/timestamp line
+  },
+  slackContentWrapper: {
+    flex: 1, // Take remaining space
+  },
+  slackHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline', // Align username and timestamp nicely
+    marginBottom: 3,
+  },
+  slackUsername: {
+    fontWeight: 'bold',
+    fontSize: 14,
+    marginRight: 8,
+    fontFamily: 'Inter-Bold', // Example bold font
+  },
+  slackTimestamp: {
+    fontSize: 12,
+    fontFamily: 'Inter',
+  },
+  slackMessageContent: {
+    // Container for the actual text/media
+    // No background or border needed here as Bubble is gone
+  },
+  linkPreviewContainer: {
+    marginTop: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.1)',
+    overflow: 'hidden',
+    // backgroundColor is set dynamically based on state/theme
+  },
+  linkPreviewImage: {
+    height: 120, // Adjust height as needed
+    width: '100%',
+  },
+  linkPreviewTextContainer: {
+    padding: 10,
+  },
+  linkPreviewTitle: {
+    fontFamily: 'Inter-Bold',
+    fontSize: 14,
+    marginBottom: 3,
+  },
+  linkPreviewDescription: {
+    fontFamily: 'Inter',
+    fontSize: 13,
+    marginBottom: 5,
+  },
+  linkPreviewUrl: {
+    fontFamily: 'Inter',
+    fontSize: 12,
   },
 });
 
