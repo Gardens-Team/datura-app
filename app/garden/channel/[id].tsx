@@ -542,7 +542,7 @@ export default function ChannelScreen() {
     try {
       const { data, error } = await supabase
         .from('users')
-        .select('id, username, profile_pic, display_name')
+        .select('id, username, profile_pic, display_name') // Ensure display_name is selected
         .in('id', uniqueUserIds);
         
       if (error) {
@@ -551,15 +551,21 @@ export default function ChannelScreen() {
       }
       
       if (data && data.length) {
+        // Add log here to inspect fetched data
+        console.log('[FetchProfiles Debug] Data from Supabase:', JSON.stringify(data));
+
         const newProfiles = data.reduce((acc, user) => {
-          acc[user.id] = { 
-            username: user.username, 
+          acc[user.id] = {
+            username: user.username,
             profile_pic: user.profile_pic,
-            displayName: user.display_name || null
+            displayName: user.display_name || null // Ensure it's being added
           };
           return acc;
-        }, {} as Record<string, { username: string, profile_pic: string, displayName: string | null }>);
-        
+        }, {} as Record<string, { username: string; profile_pic: string; displayName: string | null }>);
+
+        // Add log here to inspect the object being added to state
+        console.log('[FetchProfiles Debug] newProfiles object:', JSON.stringify(newProfiles));
+
         setUserProfiles(prev => ({ ...prev, ...newProfiles }));
       }
     } catch (err) {
@@ -2424,6 +2430,17 @@ export default function ChannelScreen() {
               };
 
               const profile = getUserProfile(item.user._id.toString());
+              const currentUserCheck = isCurrentUser(item); // Get the result
+
+              // Add this detailed log
+              console.log(
+                `[RenderItem Header Check] Msg ID: ${item._id}, ` +
+                `Sender ID: ${item.user._id}, Current User ID: ${user?.id}, ` +
+                `Is Current User: ${currentUserCheck}, ` +
+                `Profile Exists: ${!!profile}, ` +
+                `Profile DisplayName: ${profile?.displayName}, ` +
+                `Profile Username: ${profile?.username}`
+              );
 
               return (
                 <View style={styles.slackMessageContainer}>
@@ -2438,25 +2455,17 @@ export default function ChannelScreen() {
                     activeOpacity={0.8}
                     onLongPress={() => handleLongPressMessage(null, item)} // Pass context=null or adjust handler
                   >
-                    {/* Username/Timestamp Row (only for others) */}
-                    {!isCurrentUser(item) && (
-                      <View style={styles.slackHeaderRow}>
-                        <Text style={[styles.slackUsername, { color: colors.text }]}>
-                          {profile.username || item.user.name || 'User'}
-                        </Text>
-                        {/* Add Display Name if it exists and differs from username */}
-                        {profile.displayName && profile.displayName !== profile.username && (
-                          <Text style={[styles.slackDisplayName, { color: colors.secondaryText }]}>
-                            ({profile.displayName})
-                          </Text>
-                        )}
-                        <Text style={[styles.slackTimestamp, { color: colors.secondaryText }]}>
-                          {/* Format timestamp - requires date-fns or similar */}
-                          {/* {format(new Date(item.createdAt), 'h:mm a')} */}
+                    {/* Username/Timestamp Row (now always shown) */}
+                    <View style={styles.slackHeaderRow}>
+                      <Text style={[styles.slackUsername, { color: colors.text }]}>
+                        {/* Render displayName if available, otherwise username */}
+                        {profile.displayName ? profile.displayName : (profile.username || item.user.name || 'User')}
+                      </Text>
+                      {/* Timestamp removed as requested */}
+                      {/* <Text style={[styles.slackTimestamp, { color: colors.secondaryText }]}>
                           {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                        </Text>
-                      </View>
-                    )}
+                      </Text> */}
+                    </View>
 
                     {/* Message Content (Text, Image, Video, Audio) */}
                     <View style={styles.slackMessageContent}>
@@ -3058,12 +3067,6 @@ const styles = StyleSheet.create({
     position: 'relative',
     marginVertical: 4,
   },
-  mediaWrapperCurrentUser: { // Specific style for current user's media
-    position: 'relative',
-    marginVertical: 4,
-    maxWidth: '85%', // Prevent media from taking full width
-    alignSelf: 'flex-start', // Default alignment for others
-  },
   mediaContainer: {
     borderRadius: 13,
     overflow: 'hidden',
@@ -3276,64 +3279,50 @@ const styles = StyleSheet.create({
   slackHeaderRow: {
     flexDirection: 'row',
     alignItems: 'baseline', // Align username and timestamp nicely
-    marginBottom: 4, // Slightly more space
+    marginBottom: 3,
   },
   slackUsername: {
     fontWeight: 'bold',
     fontSize: 14,
     marginRight: 8,
-    fontFamily: 'Inter-Bold',
-  },
-  slackDisplayName: { // Style for the display name
-    fontSize: 13, // Slightly smaller than username
-    fontFamily: 'Inter',
-    marginLeft: 4, // Space after username
-    marginRight: 8, // Space before timestamp
-    opacity: 0.8, // Make it slightly faded
+    fontFamily: 'Inter-Bold', // Example bold font
   },
   slackTimestamp: {
-    fontSize: 11, // Slightly smaller timestamp
+    fontSize: 12,
     fontFamily: 'Inter',
-    opacity: 0.7, // Softer appearance
   },
   slackMessageContent: {
     // Container for the actual text/media
     // No background or border needed here as Bubble is gone
   },
   linkPreviewContainer: {
-    marginTop: 8, // More space above preview
+    marginTop: 5,
     borderRadius: 8,
     borderWidth: 1,
-    // borderColor set dynamically
+    borderColor: 'rgba(0,0,0,0.1)',
     overflow: 'hidden',
-    // backgroundColor set dynamically
+    // backgroundColor is set dynamically based on state/theme
   },
   linkPreviewImage: {
-    height: 150, // Standardized height
+    height: 120, // Adjust height as needed
     width: '100%',
   },
   linkPreviewTextContainer: {
-    padding: 12, // Increased padding
+    padding: 10,
   },
   linkPreviewTitle: {
     fontFamily: 'Inter-Bold',
     fontSize: 14,
-    marginBottom: 4, // More space
+    marginBottom: 3,
   },
   linkPreviewDescription: {
     fontFamily: 'Inter',
     fontSize: 13,
-    lineHeight: 18, // Improved line spacing
-    marginBottom: 6,
+    marginBottom: 5,
   },
   linkPreviewUrl: {
     fontFamily: 'Inter',
-    fontSize: 11, // Smaller URL text
-    opacity: 0.7,
-  },
-
-  linkStyle: {
-    textDecorationLine: 'underline',
+    fontSize: 12,
   },
 });
 
