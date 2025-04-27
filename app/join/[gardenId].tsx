@@ -30,10 +30,8 @@ import { Colors } from '@/constants/Colors';
 import { useColorScheme } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard';
-import { useAuth } from '@/providers/AuthProvider';
+import { useGardenAuth } from '@/providers/AuthProvider';
 import * as LocalAuthentication from 'expo-local-authentication';
-import * as SecureStore from 'expo-secure-store';
 import { getStoredPrivateKeyEncryption } from '@/utils/provisioning';
 import { registerForPushNotifications } from '@/services/notifications-service';
 import * as Crypto from 'expo-crypto';
@@ -70,7 +68,7 @@ export default function JoinGardenScreen() {
   
   // Auth modal states
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const { authenticate, authenticateWithPasscode } = useAuth();
+  const { authenticate, authenticateWithPasscode } = useGardenAuth();
 
   // Check if biometrics are available
   useEffect(() => {

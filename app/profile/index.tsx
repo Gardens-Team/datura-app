@@ -1,42 +1,128 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { 
   View, 
   Text, 
   StyleSheet, 
-  Image, 
   ScrollView, 
   TouchableOpacity, 
-  Linking
+  Linking,
+  ActivityIndicator,
+  FlatList
 } from 'react-native';
+import { Image } from 'expo-image';
 import { useColorScheme } from 'react-native';
 import { Colors } from '@/constants/Colors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useCurrentUser } from '@/hooks/useCurrentUser';
+import { useUserCreatorGardens } from '@/hooks/useUserCreatorGardens';
+import { useRouter } from 'expo-router';
+import { Garden } from '@/services/garden-service';
 
-// Placeholder user data - will be replaced with Supabase data
-const USER = {
-  username: 'GardenUser',
-  handle: 'gardenuser',
-  bio: "I'm not a champagne socialist\nI'm a anti-social angry motorist",
-  avatar: 'https://api.dicebear.com/9.x/identicon/svg?backgroundColor=00acc1,1e88e5,5e35b1',
-  website: 'https://gardenuser.substack.com/',
-  playing: {
-    name: 'Gardens',
-    time: '12:34:56'
-  },
-  memberSince: 'Jul 20, 2022',
-  friends: [1, 2, 3, 4, 5], // Will be replaced with actual friend data
-  note: ''
-};
+// Define a more complete User Profile interface based on database schema
+interface FullUserProfile {
+  id: string;
+  username: string;
+  profile_pic: string | null; // Assuming profile_pic is the correct column name
+  publicKey: string; // Assuming this is from the layout definition, might not be needed here
+  handle?: string | null; // Optional fields
+  bio?: string | null;
+  website_url?: string | null;
+  created_at?: string | null; // Assuming this is a timestamp string
+}
+
+// Function to shuffle an array (Fisher-Yates)
+function shuffleArray<T>(array: T[]): T[] {
+  let currentIndex = array.length, randomIndex;
+  const newArray = [...array]; // Create a copy
+
+  // While there remain elements to shuffle.
+  while (currentIndex !== 0) {
+    // Pick a remaining element.
+    randomIndex = Math.floor(Math.random() * currentIndex);
+    currentIndex--;
+
+    // And swap it with the current element.
+    [newArray[currentIndex], newArray[randomIndex]] = [
+      newArray[randomIndex], newArray[currentIndex]];
+  }
+
+  return newArray;
+}
 
 export default function ProfileScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
   const insets = useSafeAreaInsets();
   const isDark = colorScheme === 'dark';
+  const { user, loading: userLoading } = useCurrentUser();
+  const router = useRouter();
+
+  // Cast the user data to the more complete type
+  const fullUser = user as FullUserProfile | null;
+
+  // Fetch creator gardens using the new hook
+  const { 
+    gardens,
+    decryptedLogos,
+    loading: gardensLoading,
+    error: gardensError,
+  } = useUserCreatorGardens(fullUser?.id);
+
+  // Shuffle and limit gardens once when data is loaded
+  const displayedGardens = useMemo(() => {
+    if (gardens && gardens.length > 0) {
+      return shuffleArray(gardens).slice(0, 8); // Shuffle and take max 8
+    }
+    return [];
+  }, [gardens]);
+
+  // Combined loading state
+  const isLoading = userLoading || gardensLoading;
 
   // Random color for banner - would be user-selected in a real app
   const bannerColor = '#3b82f6';
+
+  if (isLoading) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }]}>
+        <ActivityIndicator size="large" color={colors.text} />
+      </View>
+    );
+  }
+
+  if (!fullUser) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }]}>
+        <Text style={{ color: colors.text }}>Could not load user profile.</Text>
+      </View>
+    );
+  }
+
+  const memberSinceDate = fullUser.created_at ? new Date(fullUser.created_at).toLocaleDateString('en-US', {
+    year: 'numeric', month: 'short', day: 'numeric'
+  }) : 'N/A';
+
+  // Helper to render each garden item in the grid
+  const renderGardenItem = ({ item }: { item: Garden }) => {
+    const logoUri = item.id ? decryptedLogos[item.id] : null;
+    const initials = item.name ? item.name.charAt(0).toUpperCase() : '?';
+
+    return (
+      <TouchableOpacity 
+        style={styles.myGardensItem}
+        onPress={() => item.id && router.push(`/garden/${item.id}`)} // Navigate to garden page
+      >
+        {logoUri ? (
+          <Image source={{ uri: logoUri }} style={styles.myGardensLogo} />
+        ) : (
+          <View style={[styles.myGardensLogo, styles.myGardensInitials, { backgroundColor: colors.primary + '30' }]}>
+            <Text style={[styles.initialsText, { color: colors.primary }]}>{initials}</Text>
+          </View>
+        )}
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <ScrollView 
@@ -54,9 +140,8 @@ export default function ProfileScreen() {
         </View>
         <View style={styles.profilePictureContainer}>
           <Image 
-            source={{ uri: USER.avatar }}
+            source={{ uri: fullUser.profile_pic || `https://api.dicebear.com/9.x/identicon/svg?seed=${fullUser.username}` }}
             style={styles.profilePicture}
-            defaultSource={{ uri: USER.avatar }}
           />
           <View style={styles.statusIndicator} />
         </View>
@@ -66,10 +151,10 @@ export default function ProfileScreen() {
       <View style={styles.userInfoContainer}>
         <View style={styles.usernameContainer}>
           <Text style={[styles.username, { color: colors.text }]}>
-            {USER.username} <Ionicons name="chevron-down" size={20} color={colors.text} />
+            {fullUser.username || 'N/A'} <Ionicons name="chevron-down" size={20} color={colors.text} />
           </Text>
           <Text style={[styles.handle, { color: colors.secondaryText }]}>
-            {USER.handle} • <Text style={{ color: '#3b82f6' }}>Online</Text>
+            {fullUser.handle || fullUser.username} • <Text style={{ color: '#3b82f6' }}>Online</Text>
           </Text>
         </View>
 
@@ -83,36 +168,40 @@ export default function ProfileScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Gardens Promo Card */}
-      <View style={[styles.promoCard, { backgroundColor: isDark ? '#2b2d31' : '#f2f3f5', borderColor: colors.border }]}>
-        <View style={styles.promoContent}>
-          <Text style={[styles.promoTitle, { color: colors.text }]}>
-            Check out {USER.username}'s Gardens
+      {/* My Gardens Section */}
+      <View style={[styles.myGardensContainer, { backgroundColor: isDark ? '#2b2d31' : '#f2f3f5', borderColor: colors.border }]}>
+        <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 12 }]}>My Gardens</Text> 
+        {gardensError && (
+          <Text style={{ color: colors.error }}>Error loading gardens.</Text>
+        )}
+        {!gardensError && displayedGardens.length > 0 && (
+          <FlatList
+            data={displayedGardens}
+            renderItem={renderGardenItem}
+            keyExtractor={(item) => item.id || Math.random().toString()}
+            numColumns={4}
+            columnWrapperStyle={styles.myGardensGrid}
+            scrollEnabled={false}
+          />
+        )}
+        {!gardensError && displayedGardens.length === 0 && !gardensLoading && (
+          <Text style={{ color: colors.secondaryText, textAlign: 'center' }}> 
+You haven't created any gardens yet.
           </Text>
-          
-          <View style={styles.gardenLogos}>
-            {/* Sample garden logos - will be dynamic based on user's gardens */}
-            <View style={[styles.gardenLogo, { backgroundColor: '#4ade80' }]} />
-            <View style={[styles.gardenLogo, { backgroundColor: '#f472b6' }]} />
-            <View style={[styles.gardenLogo, { backgroundColor: '#60a5fa' }]} />
-          </View>
-        </View>
-        <TouchableOpacity style={styles.closeButton}>
-          <Ionicons name="close" size={20} color={colors.secondaryText} />
-        </TouchableOpacity>
+        )}
       </View>
 
       {/* About Me */}
       <View style={styles.sectionContainer}>
         <Text style={[styles.sectionTitle, { color: colors.text }]}>About Me</Text>
-        <Text style={[styles.bioText, { color: colors.text }]}>{USER.bio}</Text>
+        <Text style={[styles.bioText, { color: colors.text }]}>{fullUser.bio || 'No bio yet.'}</Text>
         
-        {USER.website && (
+        {fullUser.website_url && (
           <TouchableOpacity 
             style={styles.websiteContainer} 
-            onPress={() => Linking.openURL(USER.website)}
+            onPress={() => fullUser.website_url && Linking.openURL(fullUser.website_url)}
           >
-            <Text style={[styles.websiteText, { color: '#3b82f6' }]}>{USER.website}</Text>
+            <Text style={[styles.websiteText, { color: '#3b82f6' }]}>{fullUser.website_url}</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -122,7 +211,7 @@ export default function ProfileScreen() {
         <Text style={[styles.sectionTitle, { color: colors.text }]}>Member Since</Text>
         <View style={styles.memberSinceContainer}>
           <Ionicons name="leaf-outline" size={18} color={colors.secondaryText} />
-          <Text style={[styles.memberSinceText, { color: colors.text }]}>{USER.memberSince}</Text>
+          <Text style={[styles.memberSinceText, { color: colors.text }]}>{memberSinceDate}</Text>
         </View>
       </View>
 
@@ -134,7 +223,7 @@ export default function ProfileScreen() {
         </View>
         
         <View style={styles.friendsContainer}>
-          {USER.friends.map((friend, index) => (
+          {[1, 2, 3, 4, 5].map((friend, index) => (
             <View 
               key={index} 
               style={[
@@ -156,7 +245,7 @@ export default function ProfileScreen() {
           style={[styles.noteContainer, { borderColor: colors.border }]}
         >
           <Text style={[styles.noteText, { color: colors.secondaryText }]}>
-            {USER.note || "Click to add a note"}
+            {"Click to add a note"}
           </Text>
         </TouchableOpacity>
       </View>
@@ -360,6 +449,38 @@ const styles = StyleSheet.create({
   },
   noteText: {
     fontSize: 14,
+  },
+  myGardensGrid: {
+    justifyContent: 'space-between', // Distribute items evenly
+    marginBottom: 10, // Add space between rows
+  },
+  myGardensItem: {
+    // Calculate width based on numColumns and spacing
+    // Example for 4 columns with some spacing:
+    width: '20%', // Reduced from 22%
+    aspectRatio: 1, // Make items square
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  myGardensLogo: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 6, // Reduced border radius slightly to match smaller size
+  },
+  myGardensInitials: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  initialsText: {
+    fontSize: 18, // Reduced from 24
+    fontWeight: '600',
+  },
+  myGardensContainer: {
+    marginHorizontal: 16,
+    borderRadius: 8,
+    padding: 16,
+    borderWidth: 1,
+    marginBottom: 20, // Match sectionContainer margin
   },
 });
 
