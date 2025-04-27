@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TextInput, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/Colors';
@@ -7,6 +7,7 @@ import { router } from 'expo-router';
 import Logo from '@/components/Logo';
 import { loginWithUsername } from '@/services/auth-service';
 import { Button } from '@/components/ui/Button';
+import { useAuth } from '@/providers/AuthProvider';
 
 export default function AuthScreen() {
   const insets = useSafeAreaInsets();
@@ -14,6 +15,20 @@ export default function AuthScreen() {
   const colors = Colors[colorScheme ?? 'light'];
   const [username, setUsername] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const { isLoggedIn, checkAuthStatus } = useAuth();
+
+  // Check if already logged in on component mount
+  useEffect(() => {
+    const checkSession = async () => {
+      const isAuth = await checkAuthStatus();
+      if (isAuth) {
+        // Redirect to tabs directly
+        router.replace("/(tabs)" as any);
+      }
+    };
+    
+    checkSession();
+  }, []);
 
   const handleLogin = async () => {
     if (!username.trim()) {
@@ -25,14 +40,20 @@ export default function AuthScreen() {
       setIsLoading(true);
       const success = await loginWithUsername(username);
       
-      if (!success) {
+      if (success) {
+        // First update auth context
+        await checkAuthStatus();
+        console.log("Login successful, navigating to tabs...");
+        
+        // Then navigate to tabs directly - not to a specific tab
+        router.replace("/(tabs)" as any);
+      } else {
         Alert.alert(
           'Authentication Failed',
           'Could not authenticate with your device key. Please ensure you\'re using your registered device.',
           [{ text: 'OK' }]
         );
       }
-      // Successful login will automatically redirect via the auth provider
     } catch (error) {
       console.error('Login error:', error);
       Alert.alert(

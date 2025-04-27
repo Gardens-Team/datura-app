@@ -44,7 +44,7 @@ export interface MessageRow {
 }
 
 // Cache for user data to avoid redundant lookups
-const userCache: Record<string, { username: string, avatar: string }> = {};
+const userCache: Record<string, { username: string, avatar: string, displayName: string | null }> = {};
 
 // Ensure we have the messages table in local SQLite
 async function ensureLocalStorage() {
@@ -124,7 +124,7 @@ export function useMessageService() {
     try {
       const { data, error } = await supabase
         .from('users')
-        .select('username, profile_pic')
+        .select('username, profile_pic, display_name')
         .eq('id', userId)
         .single();
 
@@ -132,6 +132,7 @@ export function useMessageService() {
 
       const userData = {
         username: data?.username || 'Unknown User',
+        displayName: data?.display_name || null,
         avatar: data?.profile_pic || ''
       };
 
@@ -140,7 +141,7 @@ export function useMessageService() {
       return userData;
     } catch (e) {
       console.error('[MessageService] Error fetching user data:', e);
-      return { username: 'Unknown User', avatar: '' };
+      return { username: 'Unknown User', avatar: '', displayName: null };
     }
   }, []);
 
@@ -220,6 +221,7 @@ export function useMessageService() {
         user: { 
           _id: row.sender_id,
           name: userData.username,
+          displayName: userData.displayName,
           avatar: userData.avatar
         },
         image: payload.image,
@@ -280,6 +282,8 @@ export function useMessageService() {
     if (error) {
       console.error('[MessageService] Failed to send message to Supabase:', error);
       throw error;
+    } else {
+      console.log('[MessageService] Message successfully inserted with ID:', messageId);
     }
 
     // Then save to local SQLite for offline access
@@ -428,7 +432,7 @@ export async function subscribeToChannel(
     try {
       const { data, error } = await supabase
         .from('users')
-        .select('username, profile_pic')
+        .select('username, profile_pic, display_name')
         .eq('id', senderId)
         .single();
 
@@ -436,6 +440,7 @@ export async function subscribeToChannel(
 
       const userData = {
         username: data?.username || 'Unknown User',
+        displayName: data?.display_name || null,
         avatar: data?.profile_pic || ''
       };
 
@@ -443,7 +448,7 @@ export async function subscribeToChannel(
       return userData;
     } catch (e) {
       console.error('[MessageService] Error fetching user data:', e);
-      return { username: 'Unknown User', avatar: '' };
+      return { username: 'Unknown User', displayName: null, avatar: '' };
     }
   };
   
@@ -488,7 +493,8 @@ export async function subscribeToChannel(
           createdAt: new Date(row.created_at),
           user: { 
             _id: row.sender_id,
-            name: userData.username,
+            username: userData.username,
+            displayName: userData.displayName,
             avatar: userData.avatar
           },
           image: payload.image,
@@ -516,7 +522,13 @@ export async function subscribeToChannel(
         filter: `channel_id=eq.${channelId}`
       }, 
       async (payload) => {
-        console.log('[MessageService] Realtime new message received:', payload.new.id);
+        console.log('[MessageService] Realtime message event received:', 
+          JSON.stringify({
+            id: payload.new.id,
+            channel_id: payload.new.channel_id,
+            event_type: payload.eventType
+          })
+        );
         
         const row = payload.new as MessageRow;
         

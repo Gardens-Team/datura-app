@@ -10,13 +10,6 @@ import { router } from 'expo-router';
 import { registerForPushNotifications } from '@/services/notifications-service';
 import { supabase } from '@/services/supabase-singleton';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
-import { 
-  useFonts,
-  Inter_400Regular,
-  Inter_500Medium,
-  Inter_700Bold 
-} from '@expo-google-fonts/inter';
-import * as SplashScreen from 'expo-splash-screen';
 
 // Set up notification handling
 function useNotificationObserver() {

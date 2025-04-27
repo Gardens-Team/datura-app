@@ -81,6 +81,7 @@ interface ChannelWithDescription extends Channel {
 interface ChannelUser {
   id: string;
   username: string;
+  displayName: string | null;
   avatar: string;
   status: 'online' | 'idle' | 'offline';
   role?: string;
@@ -108,6 +109,7 @@ interface GardenMember {
     id: string;
     username: string;
     profile_pic: string;
+    displayName: string | null;
   } | null;
 }
 
@@ -385,7 +387,7 @@ export default function ChannelScreen() {
   const [replyTo, setReplyTo] = useState<IMessage | null>(null);
   const [profileModalVisible, setProfileModalVisible] = useState(false);
   const [profileUser, setProfileUser] = useState<ChannelUser | null>(null);
-  const [userProfiles, setUserProfiles] = useState<Record<string, { username: string, profile_pic: string }>>({});
+  const [userProfiles, setUserProfiles] = useState<Record<string, { username: string, profile_pic: string, displayName: string | null }>>({});
 
   // Determine current user's role
   const currentMember = channelUsers.find(u => u.id === user?.id);
@@ -488,7 +490,7 @@ export default function ChannelScreen() {
         // Fetch user data for these users
         const { data: userData, error: userError } = await supabase
           .from('users')
-          .select('id, username, profile_pic')
+          .select('id, username, profile_pic, display_name')
           .in('id', userIds);
           
         if (userError) {
@@ -509,6 +511,7 @@ export default function ChannelScreen() {
             id: user.id,
             username: user.username || 'Unknown',
             avatar: user.profile_pic || '',
+            displayName: user.display_name || null,
             status: statuses[Math.floor(Math.random() * statuses.length)], // Random status for demo
             role: membership?.role || 'member'
           };
@@ -539,7 +542,7 @@ export default function ChannelScreen() {
     try {
       const { data, error } = await supabase
         .from('users')
-        .select('id, username, profile_pic')
+        .select('id, username, profile_pic, display_name')
         .in('id', uniqueUserIds);
         
       if (error) {
@@ -551,10 +554,11 @@ export default function ChannelScreen() {
         const newProfiles = data.reduce((acc, user) => {
           acc[user.id] = { 
             username: user.username, 
-            profile_pic: user.profile_pic 
+            profile_pic: user.profile_pic,
+            displayName: user.display_name || null
           };
           return acc;
-        }, {} as Record<string, { username: string, profile_pic: string }>);
+        }, {} as Record<string, { username: string, profile_pic: string, displayName: string | null }>);
         
         setUserProfiles(prev => ({ ...prev, ...newProfiles }));
       }
@@ -965,7 +969,7 @@ export default function ChannelScreen() {
       console.log(`[Mention] Fetching users from Supabase matching "${searchTerm}"`);
       const { data, error } = await supabase
         .from('users')
-        .select('id, username, profile_pic')
+        .select('id, username, profile_pic, display_name')
         .ilike('username', `%${searchTerm}%`)
         .not('id', 'eq', user?.id) // Don't show the current user
         .limit(5);
@@ -982,6 +986,7 @@ export default function ChannelScreen() {
           id: user.id,
           username: user.username || 'User',
           avatar: user.profile_pic || '',
+          displayName: user.display_name || null,
           status: 'online' as const,
         }));
         
@@ -2439,6 +2444,12 @@ export default function ChannelScreen() {
                         <Text style={[styles.slackUsername, { color: colors.text }]}>
                           {profile.username || item.user.name || 'User'}
                         </Text>
+                        {/* Add Display Name if it exists and differs from username */}
+                        {profile.displayName && profile.displayName !== profile.username && (
+                          <Text style={[styles.slackDisplayName, { color: colors.secondaryText }]}>
+                            ({profile.displayName})
+                          </Text>
+                        )}
                         <Text style={[styles.slackTimestamp, { color: colors.secondaryText }]}>
                           {/* Format timestamp - requires date-fns or similar */}
                           {/* {format(new Date(item.createdAt), 'h:mm a')} */}
@@ -2579,7 +2590,6 @@ const styles = StyleSheet.create({
   },
   flex: {
     flex: 1,
-    paddingBottom: 0,
   },
   backBtn: {
     position: 'absolute',
@@ -2591,49 +2601,42 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingVertical: Platform.OS === 'ios' ? 8 : 12, // Adjust padding for platforms
+    paddingHorizontal: 12, // Consistent horizontal padding
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0,0,0,0.1)',
+    // Removed borderBottomColor here, apply dynamically
   },
   backButton: {
-    padding: 8,
+    padding: 8, // Increased touch target
+    marginRight: 8, // Space between back and center
   },
   headerCenter: {
     flex: 1,
-    alignItems: 'center',
+    alignItems: 'center', // Center content vertically
+    marginHorizontal: 8, // Space around center section
   },
   headerRightButtons: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  hamburgerButton: {
-    padding: 4,
-    marginRight: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    width: 36,
-    height: 36,
+  hamburgerButton: { // Renamed for clarity
+    padding: 8, // Consistent touch target
+    marginRight: 4, // Space between buttons
   },
-  headerInfo: {
-    padding: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    width: 36,
-    height: 36,
+  headerInfo: { // Renamed for clarity
+    padding: 8, // Consistent touch target
   },
   channelName: {
     fontSize: 16,
     fontWeight: '600',
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
+    fontFamily: 'Inter-Bold', // Use specific font
     marginRight: 4,
   },
   gardenName: {
     fontSize: 12,
+    fontFamily: 'Inter', // Use specific font
     marginTop: 2,
+    opacity: 0.8, // Softer appearance
   },
   sendButtonContainer: {
     width: 36,
@@ -2646,8 +2649,6 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 4,
-    marginBottom: 0,
   },
   actionsContainer: {
     width: 44,
@@ -2668,25 +2669,29 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 16, // Consistent padding
+    paddingVertical: 10, // Slightly less vertical padding
+    marginTop: 8, // Add space above recording UI
     borderTopWidth: 1,
-    borderTopColor: 'rgba(0,0,0,0.1)',
+    // borderTopColor set dynamically
   },
   recordingInfo: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   recordingIndicator: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: 'red',
+    width: 10, // Smaller indicator
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FF3B30', // Use standard red
     marginRight: 8,
+    // Add animation?
   },
   recordingText: {
     fontSize: 14,
-    fontStyle: 'italic',
+    fontFamily: 'Inter',
+    opacity: 0.9,
+    // color set dynamically
   },
   recordingActions: {
     flexDirection: 'row',
@@ -2698,9 +2703,10 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   cancelText: {
-    color: 'red',
-    fontSize: 15,
+    fontSize: 14, // Slightly smaller
     fontWeight: '500',
+    fontFamily: 'Inter-Bold',
+    color: '#FF3B30', // Standard red
   },
   sendButton: {
     width: 36,
@@ -2708,6 +2714,8 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 4, // Align with bottom of input field
+    // backgroundColor set dynamically
   },
   sendText: {
     color: 'white',
@@ -2781,14 +2789,14 @@ const styles = StyleSheet.create({
   },
   statusIndicator: {
     position: 'absolute',
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    borderWidth: 1,
-    borderColor: 'white',
-    bottom: 0,
-    right: 0,
-    backgroundColor: '#8E8E93',
+    width: 12, // Slightly larger
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 2, // Thicker border for contrast
+    // borderColor set dynamically
+    bottom: -2, // Adjust positioning
+    right: -2,
+    // backgroundColor set dynamically
   },
   userName: {
     fontSize: 14,
@@ -3050,6 +3058,12 @@ const styles = StyleSheet.create({
     position: 'relative',
     marginVertical: 4,
   },
+  mediaWrapperCurrentUser: { // Specific style for current user's media
+    position: 'relative',
+    marginVertical: 4,
+    maxWidth: '85%', // Prevent media from taking full width
+    alignSelf: 'flex-start', // Default alignment for others
+  },
   mediaContainer: {
     borderRadius: 13,
     overflow: 'hidden',
@@ -3262,50 +3276,64 @@ const styles = StyleSheet.create({
   slackHeaderRow: {
     flexDirection: 'row',
     alignItems: 'baseline', // Align username and timestamp nicely
-    marginBottom: 3,
+    marginBottom: 4, // Slightly more space
   },
   slackUsername: {
     fontWeight: 'bold',
     fontSize: 14,
     marginRight: 8,
-    fontFamily: 'Inter-Bold', // Example bold font
+    fontFamily: 'Inter-Bold',
+  },
+  slackDisplayName: { // Style for the display name
+    fontSize: 13, // Slightly smaller than username
+    fontFamily: 'Inter',
+    marginLeft: 4, // Space after username
+    marginRight: 8, // Space before timestamp
+    opacity: 0.8, // Make it slightly faded
   },
   slackTimestamp: {
-    fontSize: 12,
+    fontSize: 11, // Slightly smaller timestamp
     fontFamily: 'Inter',
+    opacity: 0.7, // Softer appearance
   },
   slackMessageContent: {
     // Container for the actual text/media
     // No background or border needed here as Bubble is gone
   },
   linkPreviewContainer: {
-    marginTop: 5,
+    marginTop: 8, // More space above preview
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.1)',
+    // borderColor set dynamically
     overflow: 'hidden',
-    // backgroundColor is set dynamically based on state/theme
+    // backgroundColor set dynamically
   },
   linkPreviewImage: {
-    height: 120, // Adjust height as needed
+    height: 150, // Standardized height
     width: '100%',
   },
   linkPreviewTextContainer: {
-    padding: 10,
+    padding: 12, // Increased padding
   },
   linkPreviewTitle: {
     fontFamily: 'Inter-Bold',
     fontSize: 14,
-    marginBottom: 3,
+    marginBottom: 4, // More space
   },
   linkPreviewDescription: {
     fontFamily: 'Inter',
     fontSize: 13,
-    marginBottom: 5,
+    lineHeight: 18, // Improved line spacing
+    marginBottom: 6,
   },
   linkPreviewUrl: {
     fontFamily: 'Inter',
-    fontSize: 12,
+    fontSize: 11, // Smaller URL text
+    opacity: 0.7,
+  },
+
+  linkStyle: {
+    textDecorationLine: 'underline',
   },
 });
 
