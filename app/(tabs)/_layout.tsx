@@ -10,7 +10,7 @@ import { CreateGroupModal } from '@/components/modals/CreateGroupModal';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { getGardensByUser, Garden, decryptGardenImage, getGroupKeyForGarden } from '@/services/garden-service';
 import { useFocusEffect } from 'expo-router';
-import { getStoredPrivateKey } from '@/utils/provisioning';
+import { getStoredPrivateKeyEncryption } from '@/utils/provisioning';
 
 export interface UserProfile {
   id: string;
@@ -74,7 +74,7 @@ export default function TabLayout() {
     if (!gardensToDecrypt.length) return;
     
     try {
-      const privateKeyBase64 = await getStoredPrivateKey();
+      const privateKeyBase64 = await getStoredPrivateKeyEncryption();
       if (!privateKeyBase64) {
         console.error('Private key not available for logo decryption');
         return;

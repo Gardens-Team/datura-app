@@ -8,7 +8,7 @@ import { useCallback, useState } from 'react';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import * as SQLite from 'expo-sqlite';
 import { box } from 'tweetnacl';
-import { decryptGroupKeyFromBinary, getStoredPrivateKey } from '@/utils/provisioning';
+import { decryptGroupKeyFromBinary, getStoredPrivateKeyEncryption, getStoredPrivateKeySigning } from '@/utils/provisioning';
 
 // Enhanced IMessage interface to support mentions
 export interface EnhancedIMessage extends IMessage {
@@ -672,7 +672,7 @@ export async function getGroupKeyForChannel(channelId: string, userId: string): 
     }
     
     // Fetch private key Base64
-    const privateKeyBase64 = await getStoredPrivateKey();
+    const privateKeyBase64 = await getStoredPrivateKeyEncryption();
     if (!privateKeyBase64) {
       console.error('[MessageService] No private key in SecureStore');
       return null;

@@ -5,7 +5,7 @@ import { generateAESSymmetricKey } from '@/utils/provisioning';
 import { decode, encode } from '@stablelib/base64';
 import { box, randomBytes } from 'tweetnacl';
 import * as Crypto from 'expo-crypto';
-import { decryptGroupKeyFromBinary, getStoredPrivateKey } from '@/utils/provisioning';
+import { decryptGroupKeyFromBinary, getStoredPrivateKeyEncryption, getStoredPrivateKeySigning } from '@/utils/provisioning';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { sendPushNotification, scheduleLocalNotification } from './notifications-service';
 import * as SQLite from 'expo-sqlite';
@@ -151,11 +151,11 @@ export async function createGardenWithMembership({
   // fetch creator's public key
   const { data: userRow, error: userError } = await supabase
     .from('users')
-    .select('public_key')
+    .select('encryption_key')
     .eq('id', creatorId)
-    .single();
+    .maybeSingle();
 
-  if (userError || !userRow?.public_key) throw userError || new Error('Public key not found');
+  if (userError || !userRow?.encryption_key) throw userError || new Error('Public encryption key not found');
 
   // Encrypt the logo image if provided
   let encryptedLogo = undefined;
@@ -176,7 +176,7 @@ export async function createGardenWithMembership({
     }
   }
 
-  const encryptedKey = encryptForUser(aesKey, userRow.public_key as string);
+  const encryptedKey = encryptForUser(aesKey, userRow.encryption_key as string);
 
   // Create the garden row
   const garden = await createGarden({ 
@@ -406,7 +406,7 @@ export async function joinGarden(gardenId: string, userId: string): Promise<void
   }
 
   // 2️⃣ Decrypt the group key using the current user's private key
-  const privateKeyBase64 = await getStoredPrivateKey();
+  const privateKeyBase64 = await getStoredPrivateKeyEncryption();
   if (!privateKeyBase64) {
     throw new Error('Missing private key for decryption');
   }
@@ -553,7 +553,7 @@ export async function approveMembershipRequest(
     if (!adminKey || !adminKey.encrypted_group_key) throw new Error('Admin membership not found or missing group key');
     
     // Admin needs to decrypt their group key
-    const privateKey = await getStoredPrivateKey();
+    const privateKey = await getStoredPrivateKeyEncryption();
     if (!privateKey) throw new Error('Private key not available');
     
     // Decrypt the admin's group key

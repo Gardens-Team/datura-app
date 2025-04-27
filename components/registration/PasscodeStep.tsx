@@ -5,14 +5,24 @@ import { useColorScheme } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import * as Crypto from 'expo-crypto';
 
 interface PasscodeStepProps {
-  onComplete: () => void;
+  onComplete: (passwordHash: string) => void;
   onBack: () => void;
 }
 
 const PASSCODE_LENGTH = 6;
-const PASSCODE_KEY = 'user_passcode';
+const PASSCODE_KEY = 'datura_passcode';
+
+// Hash passcode using SHA-256
+async function hashPasscode(passcode: string): Promise<string> {
+  const hash = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    passcode
+  );
+  return hash;
+}
 
 export function PasscodeStep({ onComplete, onBack }: PasscodeStepProps) {
   const colorScheme = useColorScheme();
@@ -41,9 +51,15 @@ export function PasscodeStep({ onComplete, onBack }: PasscodeStepProps) {
     if (currentCode.length === PASSCODE_LENGTH) {
       if (isConfirming) {
         if (confirmPasscode === passcode) {
+          // Save the passcode locally
           SecureStore.setItemAsync(PASSCODE_KEY, passcode).then(async () => {
             console.log("Passcode saved:", await SecureStore.getItemAsync(PASSCODE_KEY));
-            onComplete();
+            
+            // Hash the passcode for database storage
+            const passwordHash = await hashPasscode(passcode);
+            
+            // Pass the hash to the parent component
+            onComplete(passwordHash);
           });
         } else {
           Alert.alert(

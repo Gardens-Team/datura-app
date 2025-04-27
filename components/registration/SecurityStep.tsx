@@ -1,18 +1,27 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Colors } from '@/constants/Colors';
 import { useColorScheme } from 'react-native';
-import { generateKeyPair } from '@/utils/provisioning';
+import { generateEncryptionKeyPair, generateSigningKeyPair } from '@/utils/provisioning';
 import { Ionicons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js'
 import * as Crypto from 'expo-crypto';
 import { saveUserProfile } from '@/services/database-service';
+import { router } from 'expo-router';
+import * as Device from 'expo-device';
+import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
 interface SecurityStepProps {
   onComplete: () => void;
   onBack: () => void;
   username: string;
   profilePic: string;
+  passwordHash: string;
+  publicKeyEncryption: string;
+  publicKeySigning: string;
+  tokenStr?: string;
 }
 
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!
@@ -20,35 +29,125 @@ const supabaseKey = process.env.EXPO_PUBLIC_SUPABASE_KEY!
 
 const supabase = createClient(supabaseUrl, supabaseKey)
 
-export function SecurityStep({ onComplete, onBack, username, profilePic }: SecurityStepProps) {
+// Function to check permissions and register for push notifications
+export async function registerForPushNotifications(userId?: string) {
+  if (!Device.isDevice) {
+    console.log('Must use physical device for Push Notifications');
+    return null;
+  }
+
+  // Set up a notification channel for Android
+  if (Platform.OS === 'android') {
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'Default',
+      importance: Notifications.AndroidImportance.MAX,
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#2BAC76',
+    });
+
+    // Garden notifications channel
+    await Notifications.setNotificationChannelAsync('garden', {
+      name: 'Garden Notifications',
+      description: 'Notifications for garden memberships and activities',
+      importance: Notifications.AndroidImportance.HIGH,
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#2BAC76',
+    });
+  }
+
+  // Check permissions
+  const { status: existingStatus } = await Notifications.getPermissionsAsync();
+  let finalStatus = existingStatus;
+  
+  if (existingStatus !== 'granted') {
+    const { status } = await Notifications.requestPermissionsAsync();
+    finalStatus = status;
+  }
+  
+  if (finalStatus !== 'granted') {
+    console.log('Failed to get push token for push notification!');
+    return null;
+  }
+
+  try {
+    // Get the Expo push token
+    const projectId = Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
+    if (!projectId) {
+      throw new Error('Project ID not found - configure in app.json/eas.json');
+    }
+    
+    const token = await Notifications.getExpoPushTokenAsync({
+      projectId,
+    });
+    
+    const tokenStr = token.data;
+    return tokenStr;
+  } catch (error) {
+    console.error('Error getting push token:', error);
+    return null;
+  }
+}
+
+export function SecurityStep({ onComplete, onBack, username, profilePic, passwordHash, tokenStr = '' }: SecurityStepProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
-
-  const handleGenerateKeys = async () => {
+  
+  // Check if we already have a password hash, which means we're returning
+  // from the passcode step and should complete the user creation
+  useEffect(() => {
+    if (passwordHash) {
+      completeUserCreation();
+    }
+  }, [passwordHash]);
+  
+  const completeUserCreation = async () => {
+    if (!passwordHash) {
+      // If no password hash yet, just proceed to passcode step
+      onComplete();
+      return;
+    }
+    
     setIsGenerating(true);
     try {
-      const keyPair = await generateKeyPair();
+      const keyPairEncryption = await generateEncryptionKeyPair();
+      const keyPairSigning = await generateSigningKeyPair();
       
       // Generate a single UUID
       const userId = Crypto.randomUUID();
 
-      // Create user in your database with public key
+      // Create user in Supabase with public key and password hash
       await createUser({
         id: userId,
         username,
         profilePic,
-        publicKey: keyPair.publicKey
+        publicKeyEncryption: keyPairEncryption.publicKeyEncryption,
+        publicKeySigning: keyPairSigning.publicKeySigning,
+        passwordHash: passwordHash,
+        push_token: tokenStr,
       });
 
+      // Save locally
       await saveUserProfile(userId, username, profilePic);
 
-      onComplete();
+      // Navigate directly to the home tab
+      router.replace('/(tabs)/home' as const);
     } catch (error) {
       console.error('Error in security setup:', error);
       alert('Failed to complete security setup. Please try again.');
+      onComplete(); // Still move to next step to try passcode again
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleGenerateKeys = async () => {
+    // If we already have a password hash, use it to complete account creation
+    if (passwordHash) {
+      await completeUserCreation();
+    } else {
+      // Otherwise move to passcode step first
+      onComplete();
     }
   };
 
@@ -56,7 +155,10 @@ export function SecurityStep({ onComplete, onBack, username, profilePic }: Secur
     id: string;
     username: string; 
     profilePic: string; 
-    publicKey: string; 
+    publicKeyEncryption: string; 
+    publicKeySigning: string; 
+    passwordHash: string;
+    push_token: string;
   }) {
     console.log("Supabase URL:", supabaseUrl);
     console.log("About to insert user to Supabase");
@@ -66,8 +168,11 @@ export function SecurityStep({ onComplete, onBack, username, profilePic }: Secur
         id: userData.id,
         username: userData.username,
         profile_pic: userData.profilePic,
-        public_key: userData.publicKey,
-        created_at: new Date().toISOString()
+        encryption_key: userData.publicKeyEncryption,
+        signing_key: userData.publicKeySigning,
+        passcode_hash: userData.passwordHash,
+        created_at: new Date().toISOString(),
+        push_token: userData.push_token,
       });
 
     if (error) {

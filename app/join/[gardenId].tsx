@@ -34,7 +34,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useAuth } from '@/providers/AuthProvider';
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as SecureStore from 'expo-secure-store';
-import { getStoredPrivateKey } from '@/utils/provisioning';
+import { getStoredPrivateKeyEncryption } from '@/utils/provisioning';
 import { registerForPushNotifications } from '@/services/notifications-service';
 import * as Crypto from 'expo-crypto';
 
@@ -130,7 +130,7 @@ export default function JoinGardenScreen() {
             }
             
             // Get user's private key
-            const privateKeyBase64 = await getStoredPrivateKey();
+            const privateKeyBase64 = await getStoredPrivateKeyEncryption();
             if (!privateKeyBase64) {
               console.error('Private key not available for logo decryption');
               return;

@@ -13,6 +13,18 @@ import { PasscodeStep } from '@/components/registration/PasscodeStep';
 interface UserData {
   username: string;
   profilePic: string | null;
+  passwordHash?: string;
+  publicKeyEncryption?: string;
+  publicKeySigning?: string;
+}
+
+interface SecurityStepProps {
+  onComplete: () => void;
+  onBack: () => void;
+  username: string;
+  profilePic: string;
+  passwordHash: string;
+  tokenStr?: string;
 }
 
 export default function RegisterScreen() {
@@ -50,6 +62,9 @@ export default function RegisterScreen() {
       component: <SecurityStep 
         username={userData.username}
         profilePic={userData.profilePic || ''}
+        passwordHash={userData.passwordHash || ''}
+        publicKeyEncryption={userData.publicKeyEncryption || ''}
+        publicKeySigning={userData.publicKeySigning || ''}
         onComplete={() => setCurrentStep(3)}
         onBack={() => setCurrentStep(1)}
       />
@@ -57,8 +72,10 @@ export default function RegisterScreen() {
     {
       title: 'Set Passcode',
       component: <PasscodeStep 
-        onComplete={() => {
-          router.replace('/(tabs)/home' as const);
+        onComplete={(passwordHash) => {
+          setUserData(prev => ({ ...prev, passwordHash }));
+          // Don't navigate yet, go back to security step with the hash
+          setCurrentStep(2);
         }}
         onBack={() => setCurrentStep(2)}
       />

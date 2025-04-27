@@ -4,8 +4,11 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import * as SecureStore from 'expo-secure-store';
 import { AppState } from 'react-native';
 import { TouchableWithoutFeedback, View } from 'react-native';
+import { supabase } from '@/services/supabase-singleton';
+import * as Crypto from 'expo-crypto';
 
-const PASSCODE_KEY = 'user_passcode';
+const PASSCODE_KEY = 'datura_passcode';
+const USER_ID_KEY = 'local_user_id';
 const TIMEOUT_DURATION = 30 * 1000; // 30 seconds
 
 interface AuthContextType {
@@ -16,6 +19,15 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
+
+// Function to hash passcode using SHA-256
+async function hashPasscode(passcode: string): Promise<string> {
+  const hash = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    passcode
+  );
+  return hash;
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -37,6 +49,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => subscription.remove();
   }, []);
 
+  // Verify user exists in Supabase and has matching credentials
+  const verifyUserInSupabase = async (userId: string, passcodeHash: string): Promise<boolean> => {
+    try {
+      if (!userId) {
+        console.log("No user ID found in secure storage");
+        return false;
+      }
+
+      // Query Supabase for the user
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, passcode_hash')
+        .eq('id', userId)
+        .single();
+
+      if (error || !data) {
+        console.error("Error fetching user from Supabase:", error);
+        return false;
+      }
+
+      // Check if the password hash matches
+      return data.passcode_hash === passcodeHash;
+    } catch (error) {
+      console.error("Error verifying user:", error);
+      return false;
+    }
+  };
+
   const authenticate = async () => {
     try {
       // First check if biometric authentication is available
@@ -53,42 +93,64 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (result.success) {
-          setIsAuthenticated(true);
-          setLastActivity(Date.now());
-          router.replace("/");
-          return;
+          // Get the saved passcode to verify with Supabase
+          const userId = await SecureStore.getItemAsync(USER_ID_KEY);
+          const savedPasscode = await SecureStore.getItemAsync(PASSCODE_KEY);
+          
+          if (userId && savedPasscode) {
+            const passcodeHash = await hashPasscode(savedPasscode);
+            const isVerified = await verifyUserInSupabase(userId, passcodeHash);
+            
+            if (isVerified) {
+              setIsAuthenticated(true);
+              setLastActivity(Date.now());
+              router.replace("/");
+              return;
+            } else {
+              // User exists locally but not in Supabase or credentials don't match
+              console.log("User verification with Supabase failed");
+              router.replace('/auth');
+              return;
+            }
+          } else {
+            // No user credentials stored locally
+            console.log("No user credentials found locally");
+            router.replace('/auth');
+            return;
+          }
         }
       }
 
       // If we get here, either biometrics failed or aren't available
       // The auth screen will handle showing the passcode UI
-      
-      // We don't immediately fail here - the auth screen should handle
-      // showing the passcode fallback UI
       console.log("Biometric auth not available or failed - UI should show passcode fallback");
-      
-      // DO NOT throw an error here, let the UI handle the fallback
       
     } catch (error) {
       console.error('Authentication error:', error);
-      // Still don't throw, let the UI recover
+      // Still don't throw, let the UI handle the fallback
     }
   };
 
   const authenticateWithPasscode = async (passcode: string): Promise<boolean> => {
     try {
-      const savedPasscode = await SecureStore.getItemAsync(PASSCODE_KEY);
-      console.log("Auth attempt - Saved passcode:", savedPasscode);
-      console.log("Auth attempt - Entered passcode:", passcode);
-      console.log("Auth attempt - Match?", savedPasscode === passcode);
+      const userId = await SecureStore.getItemAsync(USER_ID_KEY);
       
-      if (!savedPasscode) {
-        console.log("No passcode found in secure storage");
+      if (!userId) {
+        console.log("No user ID found in secure storage");
         return false;
       }
       
-      if (savedPasscode === passcode) {
+      const passcodeHash = await hashPasscode(passcode);
+      
+      // Verify with Supabase
+      const isVerified = await verifyUserInSupabase(userId, passcodeHash);
+      
+      if (isVerified) {
         console.log("Authentication success, redirecting...");
+        
+        // Save passcode locally for future biometric auth
+        await SecureStore.setItemAsync(PASSCODE_KEY, passcode);
+        
         setIsAuthenticated(true);
         setLastActivity(Date.now());
         
@@ -101,7 +163,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return true;
       }
       
-      console.log("Passcode mismatch");
+      console.log("Passcode verification failed");
       return false;
     } catch (error) {
       console.error('Passcode authentication error:', error);

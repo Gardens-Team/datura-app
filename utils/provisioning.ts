@@ -1,4 +1,4 @@
-import { box, setPRNG } from 'tweetnacl';
+import { box, setPRNG, sign } from 'tweetnacl';
 import { encode, decode } from '@stablelib/base64';
 import * as SecureStore from 'expo-secure-store';
 import { getRandomValues } from 'expo-crypto';
@@ -11,14 +11,22 @@ setPRNG((x, n) => {
   }
 });
 
-export interface KeyPair {
-  publicKey: string;
-  privateKey: string;
+export interface KeyPairEncryption {
+  publicKeyEncryption: string;
+  privateKeyEncryption: string;
 }
 
-const PRIVATE_KEY_STORAGE_KEY = 'datura_pk';
+export interface KeyPairSigning {
+  publicKeySigning: string;
+  privateKeySigning: string;
+}
 
-export async function generateKeyPair(): Promise<KeyPair> {
+const PRIVATE_KEY_ENCRYPTION = 'datura_private_encryption';
+const PUBLIC_KEY_ENCRYPTION = 'datura_public_encryption';
+const PRIVATE_KEY_SIGNING = 'datura_private_signing';
+const PUBLIC_KEY_SIGNING = 'datura_public_signing';
+
+export async function generateEncryptionKeyPair(): Promise<KeyPairEncryption> {
   try {
     // Generate X25519 keypair using tweetnacl
     const keyPair = box.keyPair();
@@ -30,7 +38,8 @@ export async function generateKeyPair(): Promise<KeyPair> {
     };
 
     // Store private key securely
-    await SecureStore.setItemAsync(PRIVATE_KEY_STORAGE_KEY, keys.privateKey);
+    await SecureStore.setItemAsync(PRIVATE_KEY_ENCRYPTION, keys.privateKey);
+    await SecureStore.setItemAsync(PUBLIC_KEY_ENCRYPTION, keys.publicKey);
 
     console.log('Key Generation Success:', {
       publicKeyLength: keys.publicKey.length,
@@ -38,19 +47,60 @@ export async function generateKeyPair(): Promise<KeyPair> {
       timestamp: new Date().toISOString()
     });
 
-    return keys;
+    return {
+      publicKeyEncryption: keys.publicKey,
+      privateKeyEncryption: keys.privateKey,
+    };
   } catch (error) {
     console.error('Key Generation Error:', error);
     throw error;
   }
 }
 
-export async function getStoredPrivateKey(): Promise<string | null> {
-  return await SecureStore.getItemAsync(PRIVATE_KEY_STORAGE_KEY);
+export async function generateSigningKeyPair(): Promise<KeyPairSigning> {
+  try {
+    // Generate X25519 keypair using tweetnacl
+    const keyPair = sign.keyPair();
+    
+    // Convert to base64 strings for storage
+    const keys = {
+      publicKey: encode(keyPair.publicKey),
+      privateKey: encode(keyPair.secretKey)
+    };
+
+    // Store private key securely
+    await SecureStore.setItemAsync(PRIVATE_KEY_SIGNING, keys.privateKey);
+    await SecureStore.setItemAsync(PUBLIC_KEY_SIGNING, keys.publicKey);
+
+    console.log('Key Generation Success:', {
+      publicKeyLength: keys.publicKey.length,
+      publicKeySample: `${keys.publicKey.substring(0, 10)}...${keys.publicKey.substring(keys.publicKey.length - 10)}`,
+      timestamp: new Date().toISOString()
+    });
+
+    return {
+      publicKeySigning: keys.publicKey,
+      privateKeySigning: keys.privateKey,
+    };
+  } catch (error) {
+    console.error('Key Generation Error:', error);
+    throw error;
+  }
+}
+
+export async function getStoredPrivateKeyEncryption(): Promise<string | null> {
+  return await SecureStore.getItemAsync(PRIVATE_KEY_ENCRYPTION);
+}
+
+export async function getStoredPrivateKeySigning(): Promise<string | null> {
+  return await SecureStore.getItemAsync(PRIVATE_KEY_SIGNING);
 }
 
 export async function clearStoredKeys(): Promise<void> {
-  await SecureStore.deleteItemAsync(PRIVATE_KEY_STORAGE_KEY);
+  await SecureStore.deleteItemAsync(PRIVATE_KEY_ENCRYPTION);
+  await SecureStore.deleteItemAsync(PUBLIC_KEY_ENCRYPTION);
+  await SecureStore.deleteItemAsync(PRIVATE_KEY_SIGNING);
+  await SecureStore.deleteItemAsync(PUBLIC_KEY_SIGNING);
 }
 
 // Utility function to convert stored base64 keys back to Uint8Array for tweetnacl

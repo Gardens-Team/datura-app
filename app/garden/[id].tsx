@@ -30,7 +30,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
 import * as Sharing from 'expo-sharing';
 import ViewShot from 'react-native-view-shot';
-import { getStoredPrivateKey } from '@/utils/provisioning';
+import { getStoredPrivateKeyEncryption } from '@/utils/provisioning';
 import { useHeaderHeight } from '@react-navigation/elements';
 
 export default function GardenScreen() {
@@ -89,7 +89,7 @@ export default function GardenScreen() {
               const groupKeyBase64 = await getGroupKeyForGarden(id as string);
               
               // Get user's private key
-              const privateKeyBase64 = await getStoredPrivateKey();
+              const privateKeyBase64 = await getStoredPrivateKeyEncryption();
               if (!privateKeyBase64) {
                 console.error('Private key not available for logo decryption');
                 return;
