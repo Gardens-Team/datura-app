@@ -4408,4 +4408,3 @@ const styles = StyleSheet.create({
     color: '#F44336', // Red text
   },
 });
-

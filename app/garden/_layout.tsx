@@ -223,7 +223,7 @@ function DaturaProvider({ children }: { children: React.ReactNode }) {
           
           // Use the proper setter method
           daturaClient.setChannelId(activeChannelId);
-          daturaClient.reconnect();
+            daturaClient.reconnect();
         }
       }, 10000); // Check every 10 seconds
     }
