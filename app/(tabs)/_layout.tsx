@@ -12,11 +12,17 @@ import { getGardensByUser, Garden, decryptGardenImage, getGroupKeyForGarden } fr
 import { useFocusEffect } from 'expo-router';
 import { getStoredPrivateKeyEncryption } from '@/utils/provisioning';
 
-export interface UserProfile {
-  id: string;
-  username: string;
-  profile_pic: string;
-  publicKey: string;
+// Interface for a Datura message
+interface UserProfile {
+	id: string;
+	username: string;
+	display_name: string;
+	profile_pic: string;
+	publicKey: string;
+	cover_photo: string;
+	bio: string;
+	gardens: string[];
+	status: string;
 }
 
 const PANEL_WIDTH = 72; // Width of the server list panel

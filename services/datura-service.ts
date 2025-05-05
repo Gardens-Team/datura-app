@@ -82,25 +82,25 @@ export class DaturaClient {
     
     try {
       // Try multiple WebSocket URL patterns - the server might be configured differently
-      const wsUrls = [
+    const wsUrls = [
         // Try different URL patterns used in the original code
         `${DATURA_API_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/channel/${channelId}?userId=${encodeURIComponent(this.userId)}&auth=${encodeURIComponent(this.authToken)}`,
         `${DATURA_API_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/websocket?channelId=${encodeURIComponent(channelId)}&userId=${encodeURIComponent(this.userId)}&auth=${encodeURIComponent(this.authToken)}`,
         `${DATURA_API_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/channel/${channelId}/websocket?userId=${encodeURIComponent(this.userId)}&auth=${encodeURIComponent(this.authToken)}`,
         // New format as a last resort
         `${DATURA_API_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/ws/channel/${channelId}`
-      ];
+    ];
     
       console.log('[DaturaClient] Trying multiple WebSocket URL patterns');
       let connected = false;
       let lastError = null;
       
-      for (const wsUrl of wsUrls) {
+    for (const wsUrl of wsUrls) {
         if (connected) break;
         
-        try {
+      try {
           console.log('[DaturaClient] Attempting connection to:', wsUrl);
-          this.ws = new WebSocket(wsUrl);
+        this.ws = new WebSocket(wsUrl);
         
           // Set up connection promise
           await new Promise<void>((resolve, reject) => {
@@ -113,7 +113,7 @@ export class DaturaClient {
               console.log('[DaturaClient] Connected successfully to:', wsUrl);
               connected = true;
               resolve();
-            };
+          };
           
             this.ws!.onerror = (event) => {
               console.error('[DaturaClient] WebSocket connection error:', event);
@@ -139,11 +139,15 @@ export class DaturaClient {
             
             // Send auth message if using the new format
             if (wsUrl.includes('/ws/channel/')) {
+              const user = await supabase.from('users').select('username, display_name, profile_pic').eq('id', this.userId).single();
+              const username = user.data?.username;
+              const displayName = user.data?.display_name;
+              const profile_pic = user.data?.profile_pic;
               this.ws!.send(JSON.stringify({
                 type: 'auth',
                 userId: this.userId,
                 authToken: this.authToken,
-                senderId: this.userId  // Add senderId to ensure it's included in all messages
+                senderId: this.userId,
               }));
             }
             
@@ -154,18 +158,18 @@ export class DaturaClient {
         } catch (error) {
           console.error(`[DaturaClient] Failed to connect to ${wsUrl}:`, error);
           // Close the socket if it was created but connection failed
-          if (this.ws) {
+        if (this.ws) {
             try {
-              this.ws.close();
+          this.ws.close();
             } catch (closeError) {
               console.log('[DaturaClient] Error closing failed connection:', closeError);
             }
-            this.ws = null;
-          }
-          lastError = error;
+          this.ws = null;
         }
+          lastError = error;
       }
-      
+    }
+    
       // If we reached here, all connection attempts failed
       // Ensure we keep the channel ID even after failed attempts
       console.log(`[DaturaClient] All connection attempts failed, keeping channelId as: ${this.channelId}`);
@@ -191,9 +195,6 @@ export class DaturaClient {
           console.log('[DaturaClient] Authentication successful');
         } else if (data.type === 'auth_failure') {
           console.error('[DaturaClient] Authentication failed:', data.error);
-        } else if (data.type === 'history') {
-          console.log(`[DaturaClient] Received message history: ${data.messages.length} messages`);
-          this.handleMessageHistory(data.messages);
         } else if (data.type === 'new_message') {
           console.log('[DaturaClient] Received new message:', data.message.id);
           this.addMessageToCache(data.message);
@@ -228,11 +229,11 @@ export class DaturaClient {
             message: data.message || data.error || 'Unknown error',
             code: data.code
           });
-          } else {
+        } else {
           console.log('[DaturaClient] Unhandled message type:', data.type);
         }
       } catch (error) {
-        console.error('[DaturaClient] Error processing WebSocket message:', error);
+        console.error('[DaturaClient] Error processing WebSocket message:', error, 'Raw data:', event.data);
       }
     };
     
@@ -246,13 +247,35 @@ export class DaturaClient {
         // Exponential backoff for reconnect
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // Max 30 seconds
         this.reconnectAttempts++;
-        } else {
+      } else {
         console.error('[DaturaClient] Max reconnect attempts reached');
       }
     };
     
     this.ws.onclose = (event: CloseEvent) => {
       console.log('[DaturaClient] WebSocket closed:', event.code, event.reason);
+      
+      // Handle specific WebSocket close codes
+      if (event.code === 1009) {
+        // 1009 is "Message Too Big" - we need to adjust our strategy
+        console.warn('[DaturaClient] Message size limit exceeded. Switching to smaller chunk sizes.');
+        
+        // Notify handlers of the message size issue
+        this.notifyMessageHandlers({
+          type: 'error',
+          message: 'Message size limit exceeded. Using smaller chunks.',
+          code: 1009
+        });
+        
+        // Reset history loaded state to force retry with smaller chunks
+        this.isHistoryLoaded = false;
+        
+        // Reconnect quickly but use smaller chunk sizes next time
+        this.reconnectDelay = 1000;
+        setTimeout(() => this.reconnect(), this.reconnectDelay);
+        this.reconnectAttempts++;
+        return;
+      }
       
       // Only auto-reconnect if it wasn't a clean closure
       if (!event.wasClean && this.reconnectAttempts < this.maxReconnectAttempts) {
@@ -280,38 +303,83 @@ export class DaturaClient {
     
     this.pendingHistoryRequest = true;
     console.log(`[DaturaClient] Requesting message history: limit=${limit}, before=${before || 'latest'}`);
+      
+    // Extract the base URL from the WebSocket URL
+    const wsUrl = this.ws.url;
+    let baseUrl = '';
     
-    // Determine the proper history request format based on the URL
-    // Always include the proper fields required by the server
-    const historyRequest: any = {
-      channelId: this.channelId,
-      limit: limit,
-      senderId: this.userId  // Add senderId to the request
-    };
+    if (wsUrl.startsWith('wss://')) {
+      // For secure WebSockets, convert to https
+      baseUrl = 'https://' + wsUrl.substring(6).split('/')[0];
+    } else if (wsUrl.startsWith('ws://')) {
+      // For regular WebSockets, convert to http
+      baseUrl = 'http://' + wsUrl.substring(5).split('/')[0];
+    }
     
+    console.log(`[DaturaClient] Derived base URL for HTTP requests: ${baseUrl}`);
+    
+    // Create the request URL for HTTP method - Direct to /messages/history as seen in logs
+    let requestUrl = `${baseUrl}/messages/history`;
+    
+    // Add query parameters
+    const params = new URLSearchParams();
+    params.append('limit', limit.toString());
     if (before) {
-      historyRequest.before = before;
+      params.append('before', before.toString());
     }
+    params.append('userId', this.userId);
+    // Add channelId to the query parameters
+    params.append('channelId', this.channelId || '');
     
-    // Different WebSocket protocols might use different request formats
-    if (this.ws.url.includes('/ws/channel/')) {
-      // New format
-      this.ws.send(JSON.stringify({
-        type: 'get_history',
-        ...historyRequest
-      }));
-    } else {
-      // Original/default format
-      this.ws.send(JSON.stringify({
-        type: 'history',
-        ...historyRequest
-      }));
-    }
+    requestUrl += `?${params.toString()}`;
+    
+    console.log(`[DaturaClient] Fetching history via HTTP: ${requestUrl}`);
+    
+    // Use fetch API to get history
+    fetch(requestUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${this.authToken}`,
+        'Content-Type': 'application/json'
+      }
+    })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP request failed with status ${response.status}`);
+      }
+      return response.json();
+    })
+    .then(data => {
+      console.log(`[DaturaClient] Received history via HTTP: ${data.messages?.length || 0} messages`);
+      
+      this.pendingHistoryRequest = false;
+      
+      if (data.messages && Array.isArray(data.messages)) {
+        // Process the message history
+        this.handleMessageHistory(data.messages);
+      } else {
+        console.error('[DaturaClient] Invalid response format from history endpoint:', data);
+        
+        // Notify handlers about the error
+        this.notifyMessageHandlers({
+          type: 'history_loaded',
+          messages: [],
+          error: 'Invalid response format'
+        });
+      }
+    })
+    .catch(error => {
+      console.error('[DaturaClient] Error fetching history via HTTP:', error);
+      this.pendingHistoryRequest = false;
+      
+      // If HTTP fails, try direct WebSocket as fallback
+      this.tryWebSocketHistoryRequest(limit, before);
+    });
     
     // Set timeout to clear pending flag if no response is received
     setTimeout(() => {
       if (this.pendingHistoryRequest) {
-        console.warn('[DaturaClient] History request timed out');
+        console.warn(`[DaturaClient] History request timed out`);
         this.pendingHistoryRequest = false;
         
         // Notify handlers about the timeout
@@ -323,12 +391,29 @@ export class DaturaClient {
     }, 10000);
   }
 
+  // Fallback to try WebSocket history requests when HTTP fails
+  private async tryWebSocketHistoryRequest(limit: number = 50, before?: number): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    
+    console.log('[DaturaClient] Trying WebSocket fallback for history request');
+    
+    // Create message request with appropriate format for direct messages/history
+    console.log('[DaturaClient] Using messages/history WebSocket format');
+    this.ws.send(JSON.stringify({
+      type: 'messages/history',
+      channelId: this.channelId,
+      limit: limit,
+      senderId: this.userId,
+      before: before
+    }));
+  }
+
   // Handle message history from server
   private handleMessageHistory(messages: any[]): void {
-    this.pendingHistoryRequest = false;
+    // The pendingHistoryRequest flag is now reset in the onmessage handler
     
     if (!Array.isArray(messages)) {
-      console.error('[DaturaClient] Received invalid message history format');
+      console.error('[DaturaClient] Received invalid message history format, not an array');
       this.notifyMessageHandlers({ 
         type: 'history_loaded', 
         messages: [] 
@@ -346,27 +431,58 @@ export class DaturaClient {
     
     console.log(`[DaturaClient] Processing ${messages.length} history messages`);
     
+    // Log a sample message to debug format issues
+    if (messages.length > 0) {
+      const sampleMsg = messages[0];
+      console.log('[DaturaClient] Sample message format:', 
+        JSON.stringify({
+          id: sampleMsg.id,
+          sender: sampleMsg.sender,
+          timestamp: sampleMsg.timestamp,
+          hasCiphertext: !!sampleMsg.ciphertext
+        })
+      );
+      }
+    
+    // Validate message format
+    const validMessages = messages.filter(msg => {
+      if (!msg || !msg.id || !msg.ciphertext) {
+        console.warn('[DaturaClient] Skipping invalid message:', msg?.id || 'unknown');
+        return false;
+      }
+      return true;
+    });
+    
+    if (validMessages.length < messages.length) {
+      console.warn(`[DaturaClient] Filtered out ${messages.length - validMessages.length} invalid messages`);
+    }
+    
     // Sort messages by timestamp (oldest first)
-    messages.sort((a: { timestamp: number }, b: { timestamp: number }) => a.timestamp - b.timestamp);
+    validMessages.sort((a: { timestamp: number }, b: { timestamp: number }) => a.timestamp - b.timestamp);
     
     // Add each message to the cache
-    messages.forEach(message => {
+    validMessages.forEach(message => {
       this.addMessageToCache(message);
     });
     
     // Update the last message timestamp
-    const latestMessage = messages[messages.length - 1];
-    if (latestMessage && latestMessage.timestamp > this.lastMessageTimestamp) {
-      this.lastMessageTimestamp = latestMessage.timestamp;
+    if (validMessages.length > 0) {
+      const latestMessage = validMessages[validMessages.length - 1];
+      if (latestMessage && latestMessage.timestamp > this.lastMessageTimestamp) {
+        this.lastMessageTimestamp = latestMessage.timestamp;
       }
+    }
     
     this.isHistoryLoaded = true;
     
     // Notify handlers that history is loaded
     this.notifyMessageHandlers({ 
       type: 'history_loaded', 
-      messages: Array.from(this.messageCache.values())
+      messages: Array.from(this.messageCache.values()),
+      count: validMessages.length
     });
+    
+    console.log(`[DaturaClient] History processing complete. Cache has ${this.messageCache.size} messages.`);
   }
 
   // Add a message to the cache
@@ -374,8 +490,8 @@ export class DaturaClient {
     if (!message || !message.id) {
       console.warn('[DaturaClient] Cannot add invalid message to cache');
       return;
-    }
-    
+  }
+  
     // Only add if it's not already in the cache
     if (!this.messageCache.has(message.id)) {
       this.messageCache.set(message.id, message);
@@ -430,7 +546,13 @@ export class DaturaClient {
     nonce?: string;
     ephemeral?: boolean;
     ttlSeconds?: number;
-    } = {}
+    username?: string;
+    displayName?: string;
+    profile_pic?: string;
+    senderId: string;
+    } = {
+      senderId: this.userId
+    }
   ): Promise<string> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.error('[DaturaClient] Cannot send message: WebSocket not connected');
@@ -446,7 +568,6 @@ export class DaturaClient {
       // Generate a message ID
       const messageId = Crypto.randomUUID();
       const timestamp = Date.now();
-    
       // Determine the correct message format based on the WebSocket URL
       let messageData: any;
       
@@ -466,10 +587,10 @@ export class DaturaClient {
         messageData = {
           type: 'chat_message',
           data: {
-      id: messageId,
-      channelId: this.channelId,
+            id: messageId,
+            channelId: this.channelId,
             ciphertext,
-      senderId: this.userId,
+            senderId: this.userId,
             timestamp,
             keyVersion: this.keyVersion,
             messageType: options.messageType || 'Text',
@@ -485,13 +606,14 @@ export class DaturaClient {
           message: {
             id: messageId,
             channelId: this.channelId,
-      ciphertext,
+            ciphertext,
+            senderId: this.userId,
             timestamp,
-      keyVersion: this.keyVersion,
+            keyVersion: this.keyVersion,
             messageType: options.messageType || 'Text',
             nonce: options.nonce,
-      ephemeral: options.ephemeral || false,
-      ttlSeconds: options.ttlSeconds
+            ephemeral: options.ephemeral || false,
+            ttlSeconds: options.ttlSeconds
           }
         };
       }
@@ -535,11 +657,11 @@ export class DaturaClient {
     }
   }
 
-  // Get message history from cache
+  // Get message history from cache or request from server
   getMessageHistory(limit: number = 50, before?: number): Promise<any[]> {
     return new Promise((resolve, reject) => {
       // If history is already loaded, return from cache
-      if (this.isHistoryLoaded) {
+      if (this.isHistoryLoaded && this.messageCache.size > 0) {
         console.log(`[DaturaClient] Returning ${this.messageCache.size} messages from cache`);
         let messages = Array.from(this.messageCache.values());
         
@@ -560,63 +682,220 @@ export class DaturaClient {
         return;
       }
       
-      // If we're not connected, reject
+      // If we're not connected, attempt to reconnect once before rejecting
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        console.warn('[DaturaClient] Cannot get message history: WebSocket not connected');
-        reject(new Error('WebSocket not connected'));
+        console.warn('[DaturaClient] WebSocket not connected, attempting to reconnect...');
+        
+        if (this.channelId) {
+          // Try to reconnect once
+          this.reconnect();
+          
+          // Wait for connection to establish
+          setTimeout(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              console.log('[DaturaClient] Reconnection successful, retrying getMessageHistory');
+              this.getMessageHistory(limit, before).then(resolve).catch(reject);
+            } else {
+              console.error('[DaturaClient] Reconnection failed, rejecting message history request');
+              reject(new Error('WebSocket reconnection failed'));
+            }
+          }, 2000); // Give 2 seconds for reconnection
+        } else {
+          reject(new Error('WebSocket not connected and no channel ID available'));
+        }
         return;
       }
       
       // If history isn't loaded yet, request it and wait for response
       console.log('[DaturaClient] History not loaded, requesting from server');
-        
-      // Create one-time handler for history response
-      const historyHandler = (data: any) => {
-        if (data.type === 'history_loaded') {
-          // Remove this one-time handler
-          const index = this.messageHandlers.indexOf(historyHandler);
-          if (index !== -1) {
-            this.messageHandlers.splice(index, 1);
-          }
-          
-          let messages = data.messages;
-          
-          // Sort by timestamp (newest first for display)
-          messages.sort((a: { timestamp: number }, b: { timestamp: number }) => b.timestamp - a.timestamp);
-          
-          // Apply before filter if provided
-          if (before) {
-            messages = messages.filter((msg: { timestamp: number }) => msg.timestamp < before);
-          }
-          
-          // Apply limit
-          if (limit > 0 && messages.length > limit) {
-            messages = messages.slice(0, limit);
-          }
-          
-          resolve(messages);
-        }
-      };
       
-      // Add the handler
-      this.messageHandlers.push(historyHandler);
-      
-      // Request history if not already pending
+      // Use HTTP method with pagination for large message histories
       if (!this.pendingHistoryRequest) {
-        this.requestMessageHistory(limit, before);
+        // Set up a chunked message retrieval approach
+        this.fetchMessageHistoryChunked(limit, before, resolve, reject);
+      } else {
+        console.log('[DaturaClient] History request already pending, waiting for response');
+        
+        // Set timeout to reject if history isn't received
+        setTimeout(() => {
+          if (!this.isHistoryLoaded) {
+            console.error('[DaturaClient] Timeout waiting for pending message history');
+            reject(new Error('Timeout waiting for pending message history'));
+          } else {
+            // History was loaded while we were waiting
+            this.getMessageHistory(limit, before).then(resolve).catch(reject);
+          }
+        }, 10000);
       }
-      
-      // Set timeout to reject if history isn't received
-      setTimeout(() => {
-        const index = this.messageHandlers.indexOf(historyHandler);
-        if (index !== -1) {
-          this.messageHandlers.splice(index, 1);
-          reject(new Error('Timeout waiting for message history'));
-        }
-      }, 15000);
     });
   }
-  
+
+  // New method to fetch message history in smaller chunks
+  private fetchMessageHistoryChunked(limit: number, before: number | undefined, resolve: (messages: any[]) => void, reject: (error: Error) => void): void {
+    // Smaller chunk size to avoid WebSocket message size limits
+    const chunkSize = 20;
+    const chunks = Math.ceil(limit / chunkSize);
+    let loadedChunks = 0;
+    let lastTimestamp: number | undefined = before;
+    
+    this.pendingHistoryRequest = true;
+    this.messageCache.clear();
+    
+    const loadNextChunk = () => {
+      if (loadedChunks >= chunks || loadedChunks * chunkSize >= limit) {
+        // We've loaded all the chunks we need
+        this.isHistoryLoaded = true;
+        this.pendingHistoryRequest = false;
+        
+        console.log(`[DaturaClient] All chunks loaded (${loadedChunks} chunks, ${this.messageCache.size} total messages)`);
+        
+        // Resolve with the full message history
+        let messages = Array.from(this.messageCache.values());
+        messages.sort((a: { timestamp: number }, b: { timestamp: number }) => b.timestamp - a.timestamp);
+        
+        // Apply limit
+        if (limit > 0 && messages.length > limit) {
+          messages = messages.slice(0, limit);
+        }
+        
+        // Notify all handlers that history is loaded
+        this.notifyMessageHandlers({ 
+          type: 'history_loaded', 
+          messages: messages,
+          count: this.messageCache.size
+        });
+        
+        resolve(messages);
+        return;
+      }
+      
+      // Extract the base URL from the WebSocket URL
+      const wsUrl = this.ws?.url || '';
+      let baseUrl = '';
+      
+      if (wsUrl.startsWith('wss://')) {
+        // For secure WebSockets, convert to https
+        baseUrl = 'https://' + wsUrl.substring(6).split('/')[0];
+      } else if (wsUrl.startsWith('ws://')) {
+        // For regular WebSockets, convert to http
+        baseUrl = 'http://' + wsUrl.substring(5).split('/')[0];
+      }
+      
+      if (!baseUrl) {
+        reject(new Error('Could not determine API base URL'));
+        return;
+      }
+      
+      // Create the request URL for HTTP method
+      let requestUrl = `${baseUrl}/messages/history`;
+      
+      // Add query parameters
+      const params = new URLSearchParams();
+      params.append('limit', chunkSize.toString());
+      if (lastTimestamp) {
+        params.append('before', lastTimestamp.toString());
+      }
+      params.append('userId', this.userId);
+      params.append('channelId', this.channelId || '');
+      
+      requestUrl += `?${params.toString()}`;
+      
+      console.log(`[DaturaClient] Fetching history chunk ${loadedChunks + 1}/${chunks} via HTTP: ${requestUrl}`);
+      
+      // Use fetch API to get history chunk
+      fetch(requestUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.authToken}`,
+          'Content-Type': 'application/json'
+        }
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP request failed with status ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(data => {
+        loadedChunks++;
+        
+        if (data.messages && Array.isArray(data.messages)) {
+          const messages = data.messages;
+          console.log(`[DaturaClient] Received history chunk ${loadedChunks} with ${messages.length} messages`);
+          
+          // Process and add messages to cache
+          if (messages.length > 0) {
+            // Validate and filter messages
+            const validMessages = messages.filter((msg: any) => {
+              if (!msg || !msg.id || !msg.ciphertext) {
+                console.warn('[DaturaClient] Skipping invalid message:', msg?.id || 'unknown');
+                return false;
+              }
+              return true;
+            });
+            
+            // Add each message to the cache
+            validMessages.forEach((message: any) => {
+              this.addMessageToCache(message);
+              
+              // Update last timestamp for pagination
+              if (message.timestamp && (!lastTimestamp || message.timestamp < lastTimestamp)) {
+                lastTimestamp = message.timestamp;
+              }
+            });
+            
+            // If we received a full chunk, there might be more messages to fetch
+            if (messages.length < chunkSize) {
+              // Less than a full chunk, we're done
+              loadedChunks = chunks;  // Force completion
+            }
+          } else {
+            // No messages in this chunk, we're done
+            loadedChunks = chunks;  // Force completion
+          }
+          
+          // Load the next chunk or complete
+          loadNextChunk();
+        } else {
+          console.warn('[DaturaClient] Invalid response format from history endpoint:', data);
+          // Try to continue with next chunk anyway
+          loadNextChunk();
+        }
+      })
+      .catch(error => {
+        console.error(`[DaturaClient] Error fetching history chunk ${loadedChunks + 1}:`, error);
+        
+        // Try WebSocket fallback for this chunk
+        this.tryWebSocketHistoryRequest(chunkSize, lastTimestamp)
+          .then(() => {
+            loadedChunks++;
+            setTimeout(loadNextChunk, 1000); // Wait a second before trying next chunk
+          })
+          .catch(() => {
+            // If both HTTP and WebSocket fail, we'll stop here but still return any loaded messages
+            console.warn('[DaturaClient] Both HTTP and WebSocket methods failed, returning partial history');
+            this.isHistoryLoaded = true;
+            this.pendingHistoryRequest = false;
+            
+            const messages = Array.from(this.messageCache.values())
+              .sort((a: any, b: any) => b.timestamp - a.timestamp);
+            
+            this.notifyMessageHandlers({ 
+              type: 'history_loaded', 
+              messages: messages,
+              count: this.messageCache.size,
+              partial: true
+            });
+            
+            resolve(messages);
+          });
+      });
+    };
+    
+    // Start loading chunks
+    loadNextChunk();
+  }
+
   async rotateKeys(newPublicKeyMaterial: string): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.error('[DaturaClient] Cannot rotate keys: WebSocket not connected');
@@ -627,7 +906,7 @@ export class DaturaClient {
       this.ws.send(JSON.stringify({
         type: 'key_rotation',
         publicKeyMaterial: newPublicKeyMaterial,
-        senderId: this.userId  // Add senderId to ensure compliance with server requirements
+        senderId: this.userId
       }));
     
       console.log('[DaturaClient] Key rotation initiated');
@@ -663,6 +942,18 @@ export class DaturaClient {
     // Store the channel ID safely to ensure it doesn't get lost
     const channelToReconnect = this.channelId;
     
+    // Check if we already have a valid connection
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      console.log('[DaturaClient] Already connected, no need to reconnect');
+      return;
+    }
+    
+    // If connection is connecting, wait for it
+    if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+      console.log('[DaturaClient] Connection already in progress, waiting...');
+      return;
+    }
+    
     // Close any existing connection
     if (this.ws) {
       try {
@@ -683,6 +974,31 @@ export class DaturaClient {
       console.error('[DaturaClient] Reconnect failed:', error);
       // Re-set the channel ID in case it was lost during the failed connection attempt
       this.channelId = channelToReconnect;
+      
+      // Schedule another reconnect attempt with exponential backoff
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        console.log(`[DaturaClient] Scheduling another reconnect attempt in ${this.reconnectDelay}ms`);
+        setTimeout(() => {
+          // Double-check the channel ID again to ensure it's preserved
+          if (!this.channelId) {
+            this.channelId = channelToReconnect;
+          }
+          this.reconnect();
+        }, this.reconnectDelay);
+        
+        // Exponential backoff
+        this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30000); // Max 30 seconds
+        this.reconnectAttempts++;
+      } else {
+        console.error('[DaturaClient] Max reconnect attempts reached, giving up');
+        
+        // Notify handlers of permanent disconnection
+        this.notifyMessageHandlers({
+          type: 'connection_failed',
+          error: 'Max reconnect attempts reached',
+          permanent: true
+        });
+      }
     });
   }
 
@@ -1293,8 +1609,8 @@ export function createMessageFromPayload(msg: any, payload: any): EnhancedMessag
     createdAt: new Date(msg.timestamp),
     user: {
       _id: msg.senderId,
-      name: 'Loading...',
-      avatar: ''
+      name: 'User', // This will be replaced by the UI with actual user data
+      avatar: undefined // Will be replaced with actual avatar
     },
     image: payload.image,
     video: payload.video,

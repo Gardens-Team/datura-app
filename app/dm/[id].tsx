@@ -105,7 +105,7 @@ export default function DirectMessageScreen() {
             [data.id]: {
               id: data.id,
               username: data.username,
-              avatar: data.profile_pic
+              profile_pic: data.profile_pic
             }
           }));
 
@@ -190,20 +190,26 @@ export default function DirectMessageScreen() {
   useEffect(() => {
     if (!dmChannelId || !user) return;
     
+    let isActive = true; // Flag to track if this effect is still active
+    
     const initializeDaturaClient = async () => {
       try {
         // Get the encryption key for this DM
         const key = await getDmKey(dmChannelId);
+        if (!isActive) return; // Don't update state if component unmounted
         setGroupKey(key);
         
         // Initialize the Datura client
         const client = await getDaturaClient(dmChannelId);
         
-        if (client) {
+        if (client && isActive) {
           setDaturaClient(client);
+          console.log('[DM Screen] Datura client successfully initialized');
           
           // Set up message handlers for real-time updates
-          client.onMessage((data) => {
+          const messageHandler = (data: any) => {
+            if (!isActive) return; // Don't process messages if component unmounted
+          
             if (data.type === 'new_message' && key) {
               // Process new message
               const msg = data.message;
@@ -227,24 +233,64 @@ export default function DirectMessageScreen() {
               } catch (err) {
                 console.error('Error processing incoming message:', err);
               }
+            } else if (data.type === 'error') {
+              // Handle error messages
+              console.warn('[DM Screen] Received error from Datura client:', data.message, data.code);
+              
+              if (data.code === 1009) {
+                // This is a message too large error, already handled by the client
+                console.log('[DM Screen] Message size limit error detected, client is handling reconnection');
+              }
+            } else if (data.type === 'connection_failed' && data.permanent) {
+              // Handle permanent connection failure
+              console.error('[DM Screen] Permanent connection failure, falling back to Supabase');
+              
+              // Fall back to Supabase if we have no messages yet
+              if (isActive && messages.length === 0) {
+                fetchMessages();
+              }
+              
+              // Alert user about connection issues
+              if (isActive) {
+                Alert.alert(
+                  'Connection Issue',
+                  'There was a problem connecting to the messaging service. Some features may be limited.',
+                  [{ text: 'OK' }]
+                );
+              }
             }
-          });
+          };
+          
+          client.onMessage(messageHandler);
           
           // Fetch initial messages
-          fetchDaturaMessages(client, key);
+          if (isActive) {
+            fetchDaturaMessages(client, key);
+          }
         }
       } catch (err) {
         console.error('Error initializing Datura client:', err);
         // Fall back to regular Supabase messages
-        fetchMessages();
+        if (isActive) {
+          fetchMessages();
+        }
       }
     };
     
     initializeDaturaClient();
     
     return () => {
+      console.log('[DM Screen] Cleaning up Datura client connection');
+      isActive = false; // Mark this effect as inactive
+      
       if (daturaClient) {
-        daturaClient.disconnect();
+        // Properly disconnect the client
+        try {
+          daturaClient.disconnect();
+          console.log('[DM Screen] Datura client disconnected successfully');
+        } catch (err) {
+          console.error('[DM Screen] Error disconnecting Datura client:', err);
+        }
       }
     };
   }, [dmChannelId, user]);
@@ -256,59 +302,87 @@ export default function DirectMessageScreen() {
     setLoading(true);
     
     try {
-      const messageHistory = await client.getMessageHistory();
-      console.log(`Retrieved ${messageHistory.length} messages from Datura`);
+      // Set a reasonable message limit to avoid "message too large" errors
+      const messageLimit = 30;
+      console.log(`[DM Screen] Retrieving messages from Datura (limit: ${messageLimit})`);
+      
+      const messageHistory = await client.getMessageHistory(messageLimit);
+      console.log(`[DM Screen] Retrieved ${messageHistory.length} messages from Datura`);
       
       if (messageHistory.length === 0) {
         setLoading(false);
         return;
       }
       
-      // Decrypt all messages
+      // Decrypt messages in batches to avoid processing too many at once
+      const batchSize = 10;
+      const batches = Math.ceil(messageHistory.length / batchSize);
       const decryptedMessages: DMMessage[] = [];
       
-      for (const msg of messageHistory) {
-        try {
-          // Decrypt the message
-          const payloadStr = decryptMessage(msg.ciphertext, key);
-          const payload = JSON.parse(payloadStr);
-          
-          // Create DMMessage object
-          const message: DMMessage = {
-            _id: msg.id,
-            text: payload.text || '',
-            createdAt: new Date(msg.timestamp),
-            user: {
-              _id: msg.senderId,
-              name: 'Loading...', // Will update with profile
-              avatar: ''
-            },
-            read: true, // Assume read for simplicity
-            messageType: 'Text',
-            image: payload.image,
-            video: payload.video,
-            audio: payload.audio
-          };
-          
-          decryptedMessages.push(message);
-          
-          // Fetch sender profile if needed
-          fetchUserProfile(msg.senderId);
-        } catch (err) {
-          console.error(`Error decrypting message ${msg.id}:`, err);
+      for (let batchIndex = 0; batchIndex < batches; batchIndex++) {
+        const start = batchIndex * batchSize;
+        const end = Math.min(start + batchSize, messageHistory.length);
+        const batch = messageHistory.slice(start, end);
+        
+        console.log(`[DM Screen] Processing batch ${batchIndex + 1}/${batches} (${batch.length} messages)`);
+        
+        for (const msg of batch) {
+          try {
+            // Decrypt the message
+            const payloadStr = decryptMessage(msg.ciphertext, key);
+            const payload = JSON.parse(payloadStr);
+            
+            // Create DMMessage object
+            const message: DMMessage = {
+              _id: msg.id,
+              text: payload.text || '',
+              createdAt: new Date(msg.timestamp),
+              user: msg.senderId,
+              read: true, // Assume read for simplicity
+              messageType: 'Text',
+              image: payload.image,
+              video: payload.video,
+              audio: payload.audio
+            };
+            
+            decryptedMessages.push(message);
+            
+            // Fetch sender profile if needed
+            fetchUserProfile(msg.senderId);
+          } catch (err) {
+            console.error(`[DM Screen] Error decrypting message ${msg.id}:`, err);
+          }
+        }
+        
+        // If we have messages in this batch, update the UI immediately
+        // This provides a better UX by showing messages as they're decrypted
+        if (decryptedMessages.length > 0 && batchIndex < batches - 1) {
+          // Create a sorted copy so we don't interfere with ongoing processing
+          const sortedBatch = [...decryptedMessages].sort((a, b) => 
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
+          setMessages(sortedBatch);
         }
       }
       
-      // Sort by timestamp (newest first)
+      // Sort the final set by timestamp (newest first)
       decryptedMessages.sort((a, b) => 
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       );
       
       setMessages(decryptedMessages);
     } catch (err) {
-      console.error('Error fetching Datura messages:', err);
-      // Fall back to regular Supabase messages
-      fetchMessages();
+      console.error('[DM Screen] Error fetching Datura messages:', err);
+      
+      // Don't immediately fall back to Supabase
+      // Instead, show an empty state but keep the Datura client active
+      if (messages.length === 0) {
+        // Only fall back if we have no messages at all
+        console.log('[DM Screen] No messages loaded, falling back to Supabase');
+        fetchMessages();
+      } else {
+        console.log('[DM Screen] Keeping existing messages despite fetch error');
+      }
     } finally {
       setLoading(false);
     }
@@ -406,7 +480,7 @@ export default function DirectMessageScreen() {
       const encryptedPayload = encryptMessage(JSON.stringify(payload), groupKey);
       
       // Send via Datura with correct message type capitalization
-      const messageId = await daturaClient.sendMessage(encryptedPayload, { messageType: 'Text' });
+      const messageId = await daturaClient.sendMessage(encryptedPayload, { messageType: 'Text', senderId: user.id });
       
       // Update message to remove pending state
       setMessages(prev => prev.map(msg => 
@@ -489,11 +563,7 @@ export default function DirectMessageScreen() {
           _id: msg.id,
           text: msg.text || '',
           createdAt: new Date(msg.created_at),
-          user: {
-            _id: isSentByMe ? user.id : msg.sender_id,
-            name: isSentByMe ? user.username : recipientProfile?.username || 'User',
-            avatar: isSentByMe ? user.profile_pic : recipientProfile?.profile_pic
-          },
+          user: msg.senderId,
           read: msg.read,
           messageType: msg.message_type,
           conversationId: msg.id

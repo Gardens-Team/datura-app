@@ -35,6 +35,21 @@ interface DaturaMessage {
 	messageType?: string;
 	nonce?: string;
 	mentionedUsers?: string[];
+	username?: string;
+	profile_pic?: string;
+}
+
+// Interface for a Datura message
+interface DaturaConversation {
+	id: string;
+	ciphertext: string;
+	senderId: string;
+	recipientId: string;
+	senderKey: string;
+	recipientKey: string;
+	read: boolean;
+	messageType: 'Text' | 'Image' | 'Video' | 'Audio' | 'File';
+	ephemeral: boolean;
 }
 
 // Interface for key rotation
@@ -80,16 +95,16 @@ interface ChannelSetupData {
 // Interface for a Supabase message
 interface SupabaseMessage {
 	id: string;
-	channel_id: string;
-	sender_id: string;
+	channelId: string;
+	senderId: string;
 	ciphertext: string;
-	created_at: string;
+	createdAt: string;
 	nonce: string;
-	key_version: number;
+	keyVersion: number;
 	ephemeral: boolean;
-	expires_at: string | null;
-	message_type: string;
-	garden_id?: string;
+	expiresAt: string | null;
+	messageType: string;
+	gardenId?: string;
 }
 
 export class DaturaChannelDO extends DurableObject<Env> {
@@ -385,10 +400,10 @@ export class DaturaChannelDO extends DurableObject<Env> {
 			const senderId = messageData.senderId;
 
 			if (!senderId) {
-				console.error("[WebSocket] Missing senderId in message payload");
+				console.error("[WebSocket] Missing sender in message payload");
 				ws.send(JSON.stringify({
 					type: "error",
-					message: "Missing senderId in message payload"
+					message: "Missing sender in message payload"
 				}));
 				return;
 			}
@@ -750,6 +765,8 @@ export class DaturaChannelDO extends DurableObject<Env> {
 			ephemeral?: boolean;
 			ttlSeconds?: number;
 			mentionedUsers?: string[];
+			username?: string;
+			profile_pic?: string;
 		};
 		try {
 			requestData = await request.json();
@@ -769,7 +786,7 @@ export class DaturaChannelDO extends DurableObject<Env> {
 		if (!senderId || !ciphertext) {
 			return new Response(JSON.stringify({
 				error: "Missing required fields",
-				message: "Both senderId and ciphertext are required"
+				message: "Both sender and ciphertext are required"
 			}), {
 				status: 400,
 				headers: { "Content-Type": "application/json" }
@@ -793,7 +810,7 @@ export class DaturaChannelDO extends DurableObject<Env> {
 			id: msgId,
 			ciphertext,
 			channelId: this.channel.id,
-			senderId,
+			senderId: senderId,
 			timestamp: Date.now(),
 			keyVersion: this.channel.keys.currentKeyVersion,
 			messageType: messageType || 'Text',
@@ -829,11 +846,10 @@ export class DaturaChannelDO extends DurableObject<Env> {
 
 		const channelId = this.channel.id;
 		const url = new URL(request.url);
-		const limit = parseInt(url.searchParams.get('limit') || '50');
 		const before = url.searchParams.get('before');
 		const forceClear = url.searchParams.get('clear') === 'true';
 
-		console.log(`[MESSAGING DEBUG] Fetching messages for channel ${channelId}, limit: ${limit}, before: ${before || 'none'}, forceClear: ${forceClear}`);
+		console.log(`[MESSAGING DEBUG] Fetching messages for channel ${channelId}, limit: ${100}, before: ${before || 'none'}, forceClear: ${forceClear}`);
 
 		// OPTIONAL: Clear all messages for this channel if forceClear is true
 		if (forceClear) {
@@ -857,25 +873,20 @@ export class DaturaChannelDO extends DurableObject<Env> {
 			});
 		}
 
-		// Get timestamp threshold for messages (1 hour ago as a safety measure)
-		// This helps filter out potential stale messages from previous system
-		const oneHourAgo = new Date(Date.now() - (60 * 60 * 1000)).toISOString();
-
 		// Query Supabase for messages
 		let query = this.supabase
 			.from('messages')
 			.select('*')
 			.eq('channel_id', channelId)
-			.gt('created_at', oneHourAgo) // Only get recent messages as a safety filter
 			.order('created_at', { ascending: false })
-			.limit(limit);
+			.limit(100);
 
 		// Add timestamp filtering if 'before' is provided
 		if (before) {
 			query = query.lt('created_at', new Date(parseInt(before)).toISOString());
 		}
 
-		console.log(`[MESSAGING DEBUG] Executing Supabase query for messages since ${oneHourAgo}`);
+		console.log(`[MESSAGING DEBUG] Executing Supabase query for messages`);
 		const { data, error } = await query;
 
 		if (error) {
@@ -890,14 +901,14 @@ export class DaturaChannelDO extends DurableObject<Env> {
 		// Format messages for the client
 		const messages = data ? data.map((msg: SupabaseMessage) => ({
 			id: msg.id,
-			channelId: msg.channel_id,
-			senderId: msg.sender_id,
+			channelId: msg.channelId,
+			senderId: msg.senderId,
 			ciphertext: msg.ciphertext,
-			timestamp: new Date(msg.created_at).getTime(),
-			keyVersion: msg.key_version,
+			timestamp: new Date(msg.createdAt).getTime(),
+			keyVersion: msg.keyVersion,
 			ephemeral: msg.ephemeral,
-			expiresAt: msg.expires_at ? new Date(msg.expires_at).getTime() : undefined,
-			messageType: msg.message_type,
+			expiresAt: msg.expiresAt ? new Date(msg.expiresAt).getTime() : undefined,
+			messageType: msg.messageType,
 			nonce: msg.nonce
 		})) : [];
 
@@ -940,7 +951,7 @@ export class DaturaChannelDO extends DurableObject<Env> {
 			id: msgId,
 			ciphertext,
 			channelId: this.channel.id,
-			senderId,
+			senderId: senderId,
 			timestamp: Date.now(),
 			keyVersion: this.channel.keys.currentKeyVersion,
 			messageType: messageType || 'Text',
@@ -1023,15 +1034,15 @@ export class DaturaChannelDO extends DurableObject<Env> {
 		// Prepare the message for Supabase insertion
 		const messageToInsert = {
 			id: message.id,
-			created_at: new Date(message.timestamp).toISOString(),
-			channel_id: message.channelId,
-			sender_id: message.senderId,
+			createdAt: new Date(message.timestamp).toISOString(),
+			channelId: message.channelId,
+			senderId: message.senderId,
 			ciphertext: message.ciphertext,
-			message_type: message.messageType || 'Text',
-			garden_id: this.channel?.gardenId || null,
-			key_version: message.keyVersion,
+			messageType: message.messageType || 'Text',
+			gardenId: this.channel?.gardenId || null,
+			keyVersion: message.keyVersion,
 			ephemeral: message.ephemeral || false,
-			expires_at: message.expiresAt ? new Date(message.expiresAt).toISOString() : null,
+			expiresAt: message.expiresAt ? new Date(message.expiresAt).toISOString() : null,
 			nonce: message.nonce || '{}'
 		};
 
@@ -1042,9 +1053,9 @@ export class DaturaChannelDO extends DurableObject<Env> {
 
 		console.log(`[storeAndRelayMessage] Prepared Supabase message: ${JSON.stringify({
 			id: messageToInsert.id,
-			channel_id: messageToInsert.channel_id,
-			message_type: messageToInsert.message_type,
-			garden_id: messageToInsert.garden_id
+			channelId: messageToInsert.channelId,
+			messageType: messageToInsert.messageType,
+			gardenId: messageToInsert.gardenId
 		})}`);
 
 		// Store the message in Supabase ONLY

@@ -18,6 +18,7 @@ const STORAGE_KEYS = {
   GROUP_KEYS: 'group-keys', // Will store as JSON object { channelId: groupKey }
   USER_ID: 'user-id',
   CHANNEL_STATES: 'channel-states', // Will store connection states for multiple channels
+  CHANNEL_MESSAGES: 'channel-messages', // Will store decrypted messages for channels
 };
 
 // Define types for persisted data
@@ -36,6 +37,8 @@ interface DaturaContextType {
   getGroupKey: (channelId: string) => string | null;
   storeGroupKey: (channelId: string, key: string) => void;
   activeChannelId: string | null;
+  storeMessages: (channelId: string, messages: any[]) => void;
+  getStoredMessages: (channelId: string) => any[];
 }
 
 const DaturaContext = createContext<DaturaContextType>({
@@ -45,7 +48,9 @@ const DaturaContext = createContext<DaturaContextType>({
   initializeClient: async () => null,
   getGroupKey: () => null,
   storeGroupKey: () => {},
-  activeChannelId: null
+  activeChannelId: null,
+  storeMessages: () => {},
+  getStoredMessages: () => []
 });
 
 // Hook to use the Datura context
@@ -103,6 +108,38 @@ const updateChannelState = (channelId: string, isConnected: boolean): void => {
   mmkvStorage.set(STORAGE_KEYS.CHANNEL_STATES, JSON.stringify(states));
 };
 
+// Helper functions for message storage
+const getStoredMessages = (channelId: string): any[] => {
+  const key = `${STORAGE_KEYS.CHANNEL_MESSAGES}-${channelId}`;
+  const messagesJson = mmkvStorage.getString(key);
+  if (messagesJson) {
+    try {
+      return JSON.parse(messagesJson);
+    } catch (e) {
+      console.error('[DaturaProvider] Failed to parse stored messages:', e);
+    }
+  }
+  return [];
+};
+
+const storeMessages = (channelId: string, messages: any[]): void => {
+  if (!channelId || !messages || messages.length === 0) return;
+  
+  try {
+    // Create a unique key for this channel's messages
+    const key = `${STORAGE_KEYS.CHANNEL_MESSAGES}-${channelId}`;
+    
+    // Store only the most recent 100 messages to prevent storage issues
+    const messagesToStore = messages.slice(0, 100);
+    
+    // Store the messages
+    mmkvStorage.set(key, JSON.stringify(messagesToStore));
+    console.log(`[DaturaProvider] Stored ${messagesToStore.length} messages for channel ${channelId}`);
+  } catch (e) {
+    console.error('[DaturaProvider] Error storing messages:', e);
+  }
+};
+
 // Datura Provider component
 function DaturaProvider({ children }: { children: React.ReactNode }) {
   const [daturaClient, setDaturaClient] = useState<DaturaClient | null>(null);
@@ -137,7 +174,7 @@ function DaturaProvider({ children }: { children: React.ReactNode }) {
       const client = await getDaturaClient(channelId);
       
       if (client) {
-        setDaturaClient(client);
+      setDaturaClient(client);
         updateChannelState(channelId, true);
         
         // Fetch and store group key if not already stored
@@ -184,12 +221,9 @@ function DaturaProvider({ children }: { children: React.ReactNode }) {
         if (daturaClient && !daturaClient.isConnected()) {
           console.log('[DaturaProvider] Attempting to reconnect to channel:', activeChannelId);
           
-          // Make sure channelId is set in the client
-          if (activeChannelId) {
-            // Force channelId to be set and reconnect
-            (daturaClient as any).channelId = activeChannelId;
-            daturaClient.reconnect();
-          }
+          // Use the proper setter method
+          daturaClient.setChannelId(activeChannelId);
+          daturaClient.reconnect();
         }
       }, 10000); // Check every 10 seconds
     }
@@ -222,7 +256,9 @@ function DaturaProvider({ children }: { children: React.ReactNode }) {
     initializeClient,
     getGroupKey,
     storeGroupKey,
-    activeChannelId
+    activeChannelId,
+    storeMessages,
+    getStoredMessages
   };
 
   return (

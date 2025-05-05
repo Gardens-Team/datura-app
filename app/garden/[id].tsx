@@ -439,16 +439,16 @@ export default function GardenScreen() {
       
       if (error) {
         console.error('Error fetching user data:', error);
-        return { username: 'Unknown User', avatar: '' };
+        return { username: 'Unknown User', profile_pic: '' };
       }
       
       return {
         username: data.username,
-        avatar: data.profile_pic
+        profile_pic: data.profile_pic
       };
     } catch (error) {
       console.error('Error in fetchUserData:', error);
-      return { username: 'Unknown User', avatar: '' };
+      return { username: 'Unknown User', profile_pic: '' };
     }
   };
 

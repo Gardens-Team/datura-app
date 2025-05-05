@@ -17,7 +17,7 @@ interface ChannelUser {
   id: string;
   username: string;
   displayName: string | null;
-  avatar: string;
+  profile_pic: string;
   status: 'online' | 'idle' | 'offline';
   role?: string;
 }
@@ -76,7 +76,7 @@ export function UserProfileModal({
         ]}>
           <View style={styles.profileHeader}>
             <Image
-              source={{ uri: user.avatar || 'https://via.placeholder.com/100' }}
+              source={{ uri: user.profile_pic || 'https://via.placeholder.com/100' }}
               style={styles.profileAvatar}
             />
             <View style={styles.profileInfo}>
