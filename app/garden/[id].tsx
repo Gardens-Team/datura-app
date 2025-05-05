@@ -56,19 +56,33 @@ export default function GardenScreen() {
   const [createChannelModalVisible, setCreateChannelModalVisible] = useState(false);
   const [newChannelName, setNewChannelName] = useState('');
   const [newChannelGroup, setNewChannelGroup] = useState<'Everyone'|'Staff'>('Everyone');
-  const [channelToDelete, setChannelToDelete] = useState<Channel | null>(null);
   const [deletingChannel, setDeletingChannel] = useState(false);
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
   const [channelActionModalVisible, setChannelActionModalVisible] = useState(false);
-  const [channelLockStatus, setChannelLockStatus] = useState<Record<string, boolean>>({});
   const [updatingLockStatus, setUpdatingLockStatus] = useState(false);
   const headerHeight = useHeaderHeight();
   const [groupKey, setGroupKey] = useState<string | null>(null);
+  
+  // Add refs for mutable, non-render-triggering values
+  const channelToDeleteRef = useRef<Channel | null>(null);
+  const channelLockStatusRef = useRef<Record<string, boolean>>({});
+  const operationsInProgressRef = useRef<{
+    fetchingLockStatus: boolean;
+    fetchingChannels: boolean;
+    fetchingGardenDetails: boolean;
+  }>({
+    fetchingLockStatus: false,
+    fetchingChannels: false,
+    fetchingGardenDetails: false
+  });
   
   // Set the title in the header
   useEffect(() => {
     // Fetch garden details
     async function fetchGardenDetails() {
+      if (operationsInProgressRef.current.fetchingGardenDetails) return;
+      operationsInProgressRef.current.fetchingGardenDetails = true;
+      
       try {
         const { data, error } = await supabase
           .from('gardens')
@@ -77,7 +91,12 @@ export default function GardenScreen() {
           .single();
           
         if (error) throw error;
-        setGarden(data as GardenType);
+        
+        // Use functional update
+        setGarden(prev => {
+          if (JSON.stringify(prev) === JSON.stringify(data)) return prev;
+          return data as GardenType;
+        });
         
         // Decrypt garden logo if it exists
         if (data?.logo) {
@@ -136,28 +155,39 @@ export default function GardenScreen() {
         }
       } catch (error) {
         console.error('Error fetching garden:', error);
+      } finally {
+        operationsInProgressRef.current.fetchingGardenDetails = false;
       }
     }
     
     fetchGardenDetails();
   }, [id, navigation, user]);
 
+  // Fetch channels with useCallback to create a stable function
+  const fetchChannels = useCallback(async () => {
+    if (operationsInProgressRef.current.fetchingChannels) return;
+    operationsInProgressRef.current.fetchingChannels = true;
+    
+    setLoading(true);
+    try {
+      const channelData = await getChannelsByGarden(id as string);
+      setChannels(prev => {
+        // Only update if there are changes
+        if (JSON.stringify(prev) === JSON.stringify(channelData)) return prev;
+        return channelData;
+      });
+    } catch (error) {
+      console.error('Error fetching channels:', error);
+    } finally {
+      setLoading(false);
+      operationsInProgressRef.current.fetchingChannels = false;
+    }
+  }, [id]);
+  
   // Fetch channels
   useEffect(() => {
-    async function fetchChannels() {
-      setLoading(true);
-      try {
-        const channelData = await getChannelsByGarden(id as string);
-        setChannels(channelData);
-      } catch (error) {
-        console.error('Error fetching channels:', error);
-      } finally {
-        setLoading(false);
-      }
-    }
-    
     fetchChannels();
-  }, [id]);
+  }, [fetchChannels]);
 
   // Filter channels based on search query
   const filteredChannels = searchQuery 
@@ -172,8 +202,9 @@ export default function GardenScreen() {
   const channelGroups: Record<string, Channel[]> = { 'Everyone': everyoneChannels };
   if (isCreatorOrAdmin) channelGroups['Staff'] = staffChannels;
 
-  // Function to handle channel deletion
+  // Function to handle channel deletion with useCallback
   const handleDeleteChannel = useCallback(async () => {
+    const channelToDelete = channelToDeleteRef.current;
     if (!channelToDelete) return;
 
     try {
@@ -181,9 +212,8 @@ export default function GardenScreen() {
       await deleteChannel(channelToDelete.id as string);
       
       // Update the channels list
-      const updatedChannels = await getChannelsByGarden(id as string);
-      setChannels(updatedChannels);
-      setChannelToDelete(null);
+      await fetchChannels();
+      channelToDeleteRef.current = null;
     } catch (error) {
       console.error('Error deleting channel:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to delete channel';
@@ -191,12 +221,12 @@ export default function GardenScreen() {
     } finally {
       setDeletingChannel(false);
     }
-  }, [channelToDelete, id]);
+  }, [fetchChannels]);
 
   // Show delete confirmation dialog
-  const confirmDeleteChannel = (channel: Channel) => {
+  const confirmDeleteChannel = useCallback((channel: Channel) => {
     // Set the channel to delete and show confirmation
-    setChannelToDelete(channel);
+    channelToDeleteRef.current = channel;
     Alert.alert(
       'Delete Channel',
       `Are you sure you want to delete the channel "${channel.name}"? This action cannot be undone.`,
@@ -204,7 +234,7 @@ export default function GardenScreen() {
         {
           text: 'Cancel',
           style: 'cancel',
-          onPress: () => setChannelToDelete(null)
+          onPress: () => { channelToDeleteRef.current = null; }
         },
         {
           text: 'Delete',
@@ -213,15 +243,24 @@ export default function GardenScreen() {
         }
       ]
     );
-  };
+  }, [handleDeleteChannel]);
 
+  // Process channel lock status separately from state updates
+  const processChannelLockStatus = useCallback((channelId: string, isLocked: boolean) => {
+    // Update the ref directly
+    channelLockStatusRef.current[channelId] = isLocked;
+    
+    // Only update state if needed to trigger re-render
+    return channelLockStatusRef.current;
+  }, []);
+  
   // Function to lock or unlock a channel
   const toggleChannelLock = useCallback(async (channel: Channel) => {
     if (!channel.id) return;
 
     try {
       setUpdatingLockStatus(true);
-      const isLocked = channelLockStatus[channel.id] || false;
+      const isLocked = channelLockStatusRef.current[channel.id] || false;
       
       if (isLocked) {
         await unlockChannel(channel.id);
@@ -229,11 +268,8 @@ export default function GardenScreen() {
         await lockChannel(channel.id);
       }
       
-      // Update the lock status in our state
-      setChannelLockStatus(prev => ({
-        ...prev,
-        [channel.id as string]: !isLocked
-      }));
+      // Process the updated status
+      const newStatus = processChannelLockStatus(channel.id, !isLocked);
       
       // Close the action modal
       setChannelActionModalVisible(false);
@@ -244,47 +280,57 @@ export default function GardenScreen() {
     } finally {
       setUpdatingLockStatus(false);
     }
-  }, [channelLockStatus]);
+  }, [processChannelLockStatus]);
 
   // Fetch channel lock status when channels are loaded
-  useEffect(() => {
-    async function fetchChannelLockStatus() {
-      const lockStatus: Record<string, boolean> = {};
-      
+  const fetchChannelLockStatus = useCallback(async () => {
+    if (operationsInProgressRef.current.fetchingLockStatus || channels.length === 0) return;
+    
+    operationsInProgressRef.current.fetchingLockStatus = true;
+    
+    const lockStatus: Record<string, boolean> = {};
+    
+    try {
+      // Process channels in batches to avoid blocking the UI
       for (const channel of channels) {
         if (channel.id) {
           try {
             const isLocked = await isChannelLocked(channel.id);
             lockStatus[channel.id] = isLocked;
+            
+            // Update the ref immediately
+            channelLockStatusRef.current[channel.id] = isLocked;
           } catch (error) {
             console.error(`Error fetching lock status for channel ${channel.id}:`, error);
           }
         }
       }
-      
-      setChannelLockStatus(lockStatus);
-    }
-    
-    if (channels.length > 0) {
-      fetchChannelLockStatus();
+    } finally {
+      operationsInProgressRef.current.fetchingLockStatus = false;
     }
   }, [channels]);
   
+  useEffect(() => {
+    if (channels.length > 0) {
+      fetchChannelLockStatus();
+    }
+  }, [channels, fetchChannelLockStatus]);
+  
   // Open channel action menu
-  const openChannelActionMenu = (channel: Channel) => {
+  const openChannelActionMenu = useCallback((channel: Channel) => {
     setSelectedChannel(channel);
     setChannelActionModalVisible(true);
-  };
+  }, []);
 
   // Render each channel in Slack-like style
-  const renderChannel = ({ item }: { item: Channel }) => (
+  const renderChannel = useCallback(({ item }: { item: Channel }) => (
     <TouchableOpacity 
       style={styles.channelRow} 
       onPress={() => router.push(`/garden/channel/${item.id}` as const)}
     >
       {/* Channel icon - show lock if channel is locked */}
       <Ionicons 
-        name={channelLockStatus[item.id as string] ? "lock-closed" : "chatbubble-ellipses-outline"}
+        name={channelLockStatusRef.current[item.id as string] ? "lock-closed" : "chatbubble-ellipses-outline"}
         size={18} 
         color={colors.secondaryText} 
         style={styles.channelIcon}
@@ -313,10 +359,10 @@ export default function GardenScreen() {
         </TouchableOpacity>
       )}
     </TouchableOpacity>
-  );
+  ), [colors.secondaryText, colors.text, isCreatorOrAdmin, openChannelActionMenu]);
 
   // Render each channel group with header
-  const renderChannelGroup = (title: string, data: Channel[]) => (
+  const renderChannelGroup = useCallback((title: string, data: Channel[]) => (
     <View style={styles.channelGroup}>
       <View style={styles.groupHeader}>
         <Text style={[styles.groupTitle, { color: colors.secondaryText }]}>
@@ -331,10 +377,10 @@ export default function GardenScreen() {
         ItemSeparatorComponent={() => <View style={{ height: 2 }} />}
       />
     </View>
-  );
+  ), [colors.secondaryText, renderChannel]);
 
   // Function to capture QR code as image
-  const captureQRCode = async () => {
+  const captureQRCode = useCallback(async () => {
     if (qrCodeRef.current && typeof qrCodeRef.current.capture === 'function') {
       try {
         const uri = await qrCodeRef.current.capture();
@@ -346,10 +392,10 @@ export default function GardenScreen() {
       }
     }
     return null;
-  };
+  }, []);
 
   // Function to share QR code
-  const shareQRCode = async () => {
+  const shareQRCode = useCallback(async () => {
     const uri = qrImageUri || await captureQRCode();
     if (uri) {
       try {
@@ -358,10 +404,10 @@ export default function GardenScreen() {
         console.error('Error sharing QR code:', error);
       }
     }
-  };
+  }, [captureQRCode, qrImageUri]);
 
   // Branded QR Card Component
-  const BrandedQRCard = () => (
+  const BrandedQRCard = useCallback(() => (
     <View style={[styles.qrCard, { backgroundColor: colorScheme === 'dark' ? '#222' : 'white' }]}>
       <View style={styles.qrCardHeader}>
         <Text style={[styles.qrCardTitle, { color: colors.text }]}>Garden Invitation</Text>
@@ -403,7 +449,7 @@ export default function GardenScreen() {
         Join {user?.username || 'User'} in {garden?.name || 'Garden'}
       </Text>
     </View>
-  );
+  ), [colorScheme, colors.primary, colors.secondaryText, colors.text, decryptedLogoUri, garden?.name, id, user?.profile_pic, user?.username]);
 
   // Function to create a channel
   const handleCreateChannel = useCallback(async () => {
@@ -418,18 +464,17 @@ export default function GardenScreen() {
       setNewChannelName('');
       
       // Refresh channel list
-      const updatedChannels = await getChannelsByGarden(id as string);
-      setChannels(updatedChannels);
+      await fetchChannels();
     } catch (error) {
       console.error('Error creating channel:', error);
       Alert.alert('Error', 'Failed to create channel');
     } finally {
       setLoadingChannel(false);
     }
-  }, [id, newChannelName, newChannelGroup]);
+  }, [id, newChannelName, newChannelGroup, fetchChannels]);
 
   // Fetch user data for message display
-  const fetchUserData = async (userId: string) => {
+  const fetchUserData = useCallback(async (userId: string) => {
     try {
       const { data, error } = await supabase
         .from('users')
@@ -450,7 +495,7 @@ export default function GardenScreen() {
       console.error('Error in fetchUserData:', error);
       return { username: 'Unknown User', profile_pic: '' };
     }
-  };
+  }, []);
 
   // Get the garden key for logo decryption
   useEffect(() => {
@@ -832,13 +877,13 @@ export default function GardenScreen() {
                     <ActivityIndicator size="small" color={colors.primary} />
                   ) : (
                     <Ionicons 
-                      name={channelLockStatus[selectedChannel.id as string] ? "lock-open-outline" : "lock-closed-outline"} 
+                      name={channelLockStatusRef.current[selectedChannel.id as string] ? "lock-open-outline" : "lock-closed-outline"} 
                       size={22} 
                       color={colors.primary} 
                     />
                   )}
                   <Text style={[styles.actionModalItemText, { color: colors.text }]}>
-                    {channelLockStatus[selectedChannel.id as string] ? "Unlock Channel" : "Lock Channel"}
+                    {channelLockStatusRef.current[selectedChannel.id as string] ? "Unlock Channel" : "Lock Channel"}
                   </Text>
                 </TouchableOpacity>
                 
