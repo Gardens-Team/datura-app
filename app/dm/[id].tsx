@@ -11,7 +11,8 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
-  Pressable
+  Pressable,
+  Alert
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -24,6 +25,15 @@ import * as Crypto from 'expo-crypto';
 import ParsedText from 'react-native-parsed-text';
 import { FlashList } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { 
+  DaturaClient, 
+  getDaturaClient, 
+  encryptMessage, 
+  decryptMessage, 
+  createMessageFromPayload,
+  uploadMediaAsBase64 
+} from '@/services/datura-service';
+import * as SecureStore from 'expo-secure-store';
 
 // Interface for our DM chat message
 interface DMMessage extends IMessage {
@@ -53,6 +63,9 @@ export default function DirectMessageScreen() {
   const colors = Colors[colorScheme ?? 'light'];
   const inputRef = useRef<TextInput>(null);
   const flashListRef = useRef<FlashList<DMMessage>>(null);
+  const [daturaClient, setDaturaClient] = useState<DaturaClient | null>(null);
+  const [dmChannelId, setDmChannelId] = useState<string | null>(null);
+  const [groupKey, setGroupKey] = useState<string | null>(null);
 
   // Check if this is a valid DM session
   useEffect(() => {
@@ -95,6 +108,10 @@ export default function DirectMessageScreen() {
               avatar: data.profile_pic
             }
           }));
+
+          // Get or create DM channel ID
+          const channelId = await getOrCreateDmChannel(data.id);
+          setDmChannelId(channelId);
         }
       } catch (err) {
         console.error('Failed to fetch recipient profile:', err);
@@ -102,9 +119,335 @@ export default function DirectMessageScreen() {
     };
     
     fetchRecipientProfile();
-  }, [recipientId]);
+  }, [recipientId, user]);
 
-  // Function to fetch initial messages
+  // Create or get a DM channel ID (deterministic based on the participants)
+  const getOrCreateDmChannel = async (otherUserId: string): Promise<string> => {
+    if (!user) return '';
+    
+    // Sort user IDs to ensure same channel regardless of who initiates
+    const sortedIds = [user.id, otherUserId].sort();
+    const channelName = `dm-${sortedIds[0]}-${sortedIds[1]}`;
+    
+    try {
+      // Check if channel exists
+      const { data, error } = await supabase
+        .from('channels')
+        .select('id')
+        .eq('name', channelName)
+        .single();
+      
+      if (data) {
+        return data.id;
+      }
+      
+      // Create channel if it doesn't exist
+      const { data: newChannel, error: createError } = await supabase
+        .from('channels')
+        .insert({
+          name: channelName,
+          garden_id: null, // DMs don't belong to a garden
+          created_by: user.id,
+          is_dm: true,
+          dm_participants: sortedIds
+        })
+        .select('id')
+        .single();
+      
+      if (createError) {
+        console.error('Error creating DM channel:', createError);
+        return '';
+      }
+      
+      return newChannel.id;
+    } catch (err) {
+      console.error('Error in getOrCreateDmChannel:', err);
+      return '';
+    }
+  };
+
+  // Get or generate a shared key for this DM
+  const getDmKey = async (channelId: string): Promise<string | null> => {
+    try {
+      // Check if we already have this key stored
+      const storedKey = await SecureStore.getItemAsync(`dm_key_${channelId}`);
+      if (storedKey) {
+        return storedKey;
+      }
+      
+      // Generate a new key if we don't have one
+      const newKey = Crypto.randomUUID(); // Simple key for demo purposes
+      await SecureStore.setItemAsync(`dm_key_${channelId}`, newKey);
+      
+      return newKey;
+    } catch (err) {
+      console.error('Error getting DM key:', err);
+      return null;
+    }
+  };
+  
+  // Initialize Datura client when we have the channel ID
+  useEffect(() => {
+    if (!dmChannelId || !user) return;
+    
+    const initializeDaturaClient = async () => {
+      try {
+        // Get the encryption key for this DM
+        const key = await getDmKey(dmChannelId);
+        setGroupKey(key);
+        
+        // Initialize the Datura client
+        const client = await getDaturaClient(dmChannelId);
+        
+        if (client) {
+          setDaturaClient(client);
+          
+          // Set up message handlers for real-time updates
+          client.onMessage((data) => {
+            if (data.type === 'new_message' && key) {
+              // Process new message
+              const msg = data.message;
+              
+              try {
+                // Decrypt the message
+                const decrypted = decryptMessage(msg.ciphertext, key);
+                const payload = JSON.parse(decrypted);
+                
+                // Create message object
+                const newMessage = createMessageFromPayload(msg, payload);
+                
+                // Mark as read automatically since we're viewing it
+                markMessageAsRead(newMessage._id.toString());
+                
+                // Add to messages state
+                setMessages(prev => GiftedChat.append(prev, [newMessage as DMMessage]));
+                
+                // Update user profile if needed
+                fetchUserProfile(msg.senderId);
+              } catch (err) {
+                console.error('Error processing incoming message:', err);
+              }
+            }
+          });
+          
+          // Fetch initial messages
+          fetchDaturaMessages(client, key);
+        }
+      } catch (err) {
+        console.error('Error initializing Datura client:', err);
+        // Fall back to regular Supabase messages
+        fetchMessages();
+      }
+    };
+    
+    initializeDaturaClient();
+    
+    return () => {
+      if (daturaClient) {
+        daturaClient.disconnect();
+      }
+    };
+  }, [dmChannelId, user]);
+  
+  // Fetch messages using Datura client
+  const fetchDaturaMessages = async (client: DaturaClient, key: string | null) => {
+    if (!client || !key) return;
+    
+    setLoading(true);
+    
+    try {
+      const messageHistory = await client.getMessageHistory();
+      console.log(`Retrieved ${messageHistory.length} messages from Datura`);
+      
+      if (messageHistory.length === 0) {
+        setLoading(false);
+        return;
+      }
+      
+      // Decrypt all messages
+      const decryptedMessages: DMMessage[] = [];
+      
+      for (const msg of messageHistory) {
+        try {
+          // Decrypt the message
+          const payloadStr = decryptMessage(msg.ciphertext, key);
+          const payload = JSON.parse(payloadStr);
+          
+          // Create DMMessage object
+          const message: DMMessage = {
+            _id: msg.id,
+            text: payload.text || '',
+            createdAt: new Date(msg.timestamp),
+            user: {
+              _id: msg.senderId,
+              name: 'Loading...', // Will update with profile
+              avatar: ''
+            },
+            read: true, // Assume read for simplicity
+            messageType: 'Text',
+            image: payload.image,
+            video: payload.video,
+            audio: payload.audio
+          };
+          
+          decryptedMessages.push(message);
+          
+          // Fetch sender profile if needed
+          fetchUserProfile(msg.senderId);
+        } catch (err) {
+          console.error(`Error decrypting message ${msg.id}:`, err);
+        }
+      }
+      
+      // Sort by timestamp (newest first)
+      decryptedMessages.sort((a, b) => 
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      
+      setMessages(decryptedMessages);
+    } catch (err) {
+      console.error('Error fetching Datura messages:', err);
+      // Fall back to regular Supabase messages
+      fetchMessages();
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Fetch sender profile
+  const fetchUserProfile = async (userId: string) => {
+    // Skip if we already have this profile
+    if (userProfiles[userId]) return;
+    
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, username, profile_pic')
+        .eq('id', userId)
+        .single();
+      
+      if (error) {
+        console.error('Error fetching user profile:', error);
+        return;
+      }
+      
+      if (data) {
+        // Update user profiles
+        setUserProfiles(prev => ({
+          ...prev,
+          [userId]: {
+            id: data.id,
+            username: data.username,
+            avatar: data.profile_pic
+          }
+        }));
+        
+        // Update messages with this user
+        setMessages(prev => prev.map(msg => 
+          msg.user._id === userId 
+            ? {
+                ...msg,
+                user: {
+                  ...msg.user,
+                  name: data.username,
+                  avatar: data.profile_pic
+                }
+              }
+            : msg
+        ));
+      }
+    } catch (err) {
+      console.error('Error in fetchUserProfile:', err);
+    }
+  };
+
+  // Send a message using Datura
+  const sendDaturaMessage = async (text: string) => {
+    if (!text.trim() || !user || !daturaClient || !groupKey) {
+      // Fall back to regular send method
+      sendMessage(text);
+      return;
+    }
+    
+    // Clear input
+    setInputText('');
+    Keyboard.dismiss();
+    
+    // Generate a temporary message ID
+    const messageId = Crypto.randomUUID();
+    
+    // Create a temporary message to show immediately
+    const tempMessage: DMMessage = {
+      _id: messageId,
+      text,
+      createdAt: new Date(),
+      user: {
+        _id: user.id,
+        name: user.username,
+        avatar: user.profile_pic
+      },
+      pending: true,
+      read: false
+    };
+    
+    // Add to messages immediately
+    setMessages(previousMessages => GiftedChat.append(previousMessages, [tempMessage]));
+    
+    try {
+      setSending(true);
+      
+      // Prepare the message payload
+      const payload = {
+        text,
+        mentioned_users: mentionedUsers.length > 0 ? mentionedUsers : undefined
+      };
+      
+      // Encrypt the payload
+      const encryptedPayload = encryptMessage(JSON.stringify(payload), groupKey);
+      
+      // Send via Datura with correct message type capitalization
+      const messageId = await daturaClient.sendMessage(encryptedPayload, { messageType: 'Text' });
+      
+      // Update message to remove pending state
+      setMessages(prev => prev.map(msg => 
+        msg._id === tempMessage._id 
+          ? { ...msg, _id: messageId, pending: false }
+          : msg
+      ));
+    } catch (err) {
+      console.error('Error sending Datura message:', err);
+      
+      // Mark as error
+      setMessages(prev => prev.map(msg => 
+        msg._id === tempMessage._id 
+          ? { ...msg, pending: false, error: true }
+          : msg
+      ));
+      
+      Alert.alert('Error', 'Failed to send message. Please try again.');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  // Mark a message as read
+  const markMessageAsRead = useCallback(async (messageId: string) => {
+    try {
+      // Update in Supabase for existing conversations
+      const { error } = await supabase
+        .from('conversations')
+        .update({ read: true })
+        .eq('id', messageId);
+      
+      if (error) {
+        console.error('Error marking message as read:', error);
+      }
+    } catch (err) {
+      console.error('Error in markMessageAsRead:', err);
+    }
+  }, []);
+
+  // Function to fetch initial messages (legacy Supabase method)
   const fetchMessages = useCallback(async () => {
     if (!user || !recipientId) return;
     
@@ -165,9 +508,9 @@ export default function DirectMessageScreen() {
     }
   }, [user, recipientId, recipientProfile]);
 
-  // Set up Supabase realtime subscription
+  // Set up Supabase realtime subscription (legacy method)
   useEffect(() => {
-    if (!user || !recipientId) return;
+    if (!user || !recipientId || daturaClient) return;
     
     const setupRealtimeSubscription = async () => {
       // Fetch initial messages
@@ -206,7 +549,7 @@ export default function DirectMessageScreen() {
           
           // Mark as read if sent by the other person
           if (!isSentByMe) {
-            markAsRead(newMsg.id);
+            markMessageAsRead(newMsg.id);
           }
         })
         .subscribe((status) => {
@@ -227,49 +570,9 @@ export default function DirectMessageScreen() {
         if (unsub) unsub();
       })();
     };
-  }, [user, recipientId, fetchMessages, recipientProfile]);
+  }, [user, recipientId, fetchMessages, recipientProfile, daturaClient, markMessageAsRead]);
 
-  // Function to mark message as read
-  const markAsRead = async (messageId: string) => {
-    try {
-      const { error } = await supabase
-        .from('conversations')
-        .update({ read: true })
-        .eq('id', messageId);
-      
-      if (error) {
-        console.error('Error marking message as read:', error);
-      }
-    } catch (err) {
-      console.error('Error in markAsRead:', err);
-    }
-  };
-
-  // Mark recipient's messages as read when component mounts
-  useEffect(() => {
-    const markAllAsRead = async () => {
-      if (!user || !recipientId) return;
-      
-      try {
-        const { error } = await supabase
-          .from('conversations')
-          .update({ read: true })
-          .eq('recipient_id', user.id)
-          .eq('sender_id', recipientId)
-          .eq('read', false);
-        
-        if (error) {
-          console.error('Error marking messages as read:', error);
-        }
-      } catch (err) {
-        console.error('Error in markAllAsRead:', err);
-      }
-    };
-    
-    markAllAsRead();
-  }, [user, recipientId]);
-
-  // Handle sending messages
+  // Legacy send message function
   const sendMessage = async (text: string) => {
     if (!text.trim() || !user || !recipientId || !recipientProfile) return;
     
@@ -311,7 +614,7 @@ export default function DirectMessageScreen() {
           recipient_key: recipientProfile.publicKey,
           text,
           read: false,
-          message_type: 'text'
+          message_type: 'Text'
         });
       
       if (error) {
@@ -420,6 +723,15 @@ export default function DirectMessageScreen() {
     // Focus the input again
     if (inputRef.current) {
       inputRef.current.focus();
+    }
+  };
+
+  // Send button handler
+  const handleSendPress = () => {
+    if (daturaClient && groupKey) {
+      sendDaturaMessage(inputText);
+    } else {
+      sendMessage(inputText);
     }
   };
 
@@ -566,7 +878,7 @@ export default function DirectMessageScreen() {
                 opacity: inputText.trim() ? 1 : 0.5
               }
             ]}
-            onPress={() => sendMessage(inputText)}
+            onPress={handleSendPress}
             disabled={!inputText.trim() || sending}
           >
             {sending ? (
@@ -687,7 +999,7 @@ export default function DirectMessageScreen() {
             avatar: user?.profile_pic || '',
           }}
           renderBubble={renderBubble}
-          renderInputToolbar={() => null} // Use custom input
+          renderInputToolbar={() => null}
           renderMessage={renderMessage}
           inverted={true}
           minInputToolbarHeight={0}

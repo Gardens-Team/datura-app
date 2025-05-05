@@ -31,7 +31,7 @@
         "credentialsSource": "remote"
       },
       "env": {
-        "GOOGLE_SERVICES_FILE": "{{secrets.GOOGLE_SERVICES_JSON}}"
+        "GOOGLE_SERVICES_FILE": "{{secrets.EXPO_PUBLIC_GOOGLE_SERVICES_JSON}}"
       }
     }
   },

@@ -21,6 +21,9 @@ import {
   FlatList,
   TextInput,
   LayoutAnimation,
+  Dimensions,
+  findNodeHandle,
+  UIManager,
 } from 'react-native';
 import {
   GiftedChat,
@@ -33,6 +36,8 @@ import {
   Actions,
   IMessage,
   Avatar,
+  Message as MessageComponent,
+  User as ChatUser,
 } from 'react-native-gifted-chat';
 import { Audio, AVPlaybackStatus, ResizeMode, Video } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
@@ -45,24 +50,26 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
 import { supabase } from '@/services/supabase-singleton';
 import { 
-  uploadAudioMessage,
-  uploadImageMessage,
-  ExtendedMessage,
-  useMessageService,
-  subscribeToChannel,
-  getGroupKeyForChannel,
-  deleteMessage,
-} from '@/services/message-service';
+  DaturaClient,
+  getDaturaClient, 
+  batchDecryptMessages, 
+  encryptMessage,
+  decryptMessage,
+  uploadMediaAsBase64,
+  createMessageFromPayload,
+  EnhancedMessage,
+} from '@/services/datura-service';
 import { Channel, Garden, isChannelLocked as checkChannelLocked } from '@/services/garden-service';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
-import { useEffect as useDebugEffect } from 'react';
 import * as Sharing from 'expo-sharing';
 import AdminNotification from '@/components/AdminNotification';
 import { useTheme } from '@react-navigation/native';
 import ParsedText from 'react-native-parsed-text';
 import * as Crypto from 'expo-crypto';
 import * as MediaLibrary from 'expo-media-library';
-import { getLinkPreview /* LinkPreviewResponse (use any) */ } from 'link-preview-js'; // Import the library
+import { getLinkPreview } from 'link-preview-js';
+import { useDatura } from '../_layout';
+import { LinearGradient } from 'expo-linear-gradient';
 
 // Custom interface for the recording state
 interface RecordingState {
@@ -92,6 +99,7 @@ interface SupabaseUserData {
   id: string;
   username: string;
   profile_pic: string;
+  displayName: string | null; // Make it required but nullable
 }
 
 // Add interface for membership data that matches the selected fields
@@ -337,21 +345,54 @@ const MessageAudio = ({ currentMessage, audioStyle }: { currentMessage: IMessage
   );
 };
 
+// Create a MessageSkeleton component
+const MessageSkeleton = () => {
+  const colorScheme = useColorScheme();
+  const colors = Colors[colorScheme ?? 'light'];
+  const bgColor = colorScheme === 'dark' ? '#2A2A2C' : '#F2F2F7';
+  const highlightColor = colorScheme === 'dark' ? '#3A3A3C' : '#E5E5EA';
+  
+  return (
+    <View style={styles.skeletonContainer}>
+      {[1, 2, 3, 4, 5].map(i => (
+        <View key={i} style={[styles.skeletonMessage, { backgroundColor: bgColor }]}>
+          <View style={styles.skeletonAvatar} />
+          <View style={styles.skeletonContent}>
+            <View style={[styles.skeletonName, { backgroundColor: highlightColor }]} />
+            <View style={[styles.skeletonText, { backgroundColor: highlightColor }]} />
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+};
+
 export default function ChannelScreen() {
+  // Import useDatura with destructuring to access all the functions we need
   const { id } = useLocalSearchParams<{ id: string }>(); // channel id
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const { user } = useCurrentUser();
-  const { fetchMessages, sendMessage } = useMessageService();
+  const { 
+    initializeClient, 
+    daturaClient: contextDaturaClient,
+    getGroupKey,
+    storeGroupKey
+  } = useDatura();
+  const [daturaClient, setDaturaClient] = useState<DaturaClient | null>(contextDaturaClient);
+
+  // Keep setup variables as refs
+  const initializationAttempted = useRef(false);
+  const setupCompleted = useRef(false);
 
   // States
   const [messages, setMessages] = useState<IMessage[]>([]);
   const [groupKey, setGroupKey] = useState<string | null>(null);
   const [inputText, setInputText] = useState('');
   const [inputHeight, setInputHeight] = useState(36); // Initial composer height
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [channel, setChannel] = useState<ChannelWithDescription | null>(null);
   const [garden, setGarden] = useState<Garden | null>(null);
@@ -387,14 +428,14 @@ export default function ChannelScreen() {
   const [replyTo, setReplyTo] = useState<IMessage | null>(null);
   const [profileModalVisible, setProfileModalVisible] = useState(false);
   const [profileUser, setProfileUser] = useState<ChannelUser | null>(null);
-  const [userProfiles, setUserProfiles] = useState<Record<string, { username: string, profile_pic: string, displayName: string | null }>>({});
+  const [userProfiles, setUserProfiles] = useState<Record<string, SupabaseUserData>>({});
 
   // Determine current user's role
   const currentMember = channelUsers.find(u => u.id === user?.id);
   const currentRole = currentMember?.role;
   const isAdminUser = currentRole === 'creator' || currentRole === 'admin' || currentRole === 'moderator';
 
-  // Add these new state variables
+  // Mention state
   const [mentionLoading, setMentionLoading] = useState(false);
   const [mentionSuggestions, setMentionSuggestions] = useState<ChannelUser[]>([]);
   const [currentTextInput, setCurrentTextInput] = useState('');
@@ -403,6 +444,30 @@ export default function ChannelScreen() {
 
   // Add a ref for the text input
   const textInputRef = useRef<TextInput>(null);
+
+  // Add these state variables 
+  const [initialLoading, setInitialLoading] = useState(false); // Changed from true
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Add to the top of your component
+  const [wsConnected, setWsConnected] = useState(false);
+
+  // Add effect to monitor WebSocket connection
+  useEffect(() => {
+    if (!daturaClient) return;
+    
+    const checkInterval = setInterval(() => {
+      const isConnected = daturaClient.isConnected();
+      setWsConnected(isConnected);
+      
+      if (!isConnected) {
+        console.log('[ChannelScreen] WebSocket disconnected, attempting reconnect');
+        daturaClient.reconnect();
+      }
+    }, 5000);
+    
+    return () => clearInterval(checkInterval);
+  }, [daturaClient]);
 
   // Fetch channel and garden info
   useEffect(() => {
@@ -526,118 +591,147 @@ export default function ChannelScreen() {
     fetchChannelUsers();
   }, [channel, id]);
 
-  // Add a function to fetch user profiles for message senders
-  const fetchUserProfiles = useCallback(async (messageUserIds: string[]) => {
-    if (!messageUserIds.length) return;
+  // Fetch user profiles
+  const profileRequestCache = useRef(new Set<string>());
+  const fetchUserProfiles = useCallback(async (userIds: string[]) => {
+    if (userIds.length === 0) return;
     
-    // Filter out duplicates and already fetched users
-    const uniqueUserIds = [...new Set(messageUserIds)].filter(
-      id => !userProfiles[id] && id !== 'system'
+    // Filter out IDs we've already requested
+    const newUserIds = userIds.filter(id => 
+      id && !profileRequestCache.current.has(id) && !userProfiles[id]
     );
     
-    if (!uniqueUserIds.length) return;
+    if (newUserIds.length === 0) {
+      console.log('[ChannelScreen] All user profiles already requested or cached');
+      return;
+    }
     
-    console.log(`[ChannelScreen] Fetching profiles for ${uniqueUserIds.length} users`);
+    console.log(`[ChannelScreen] Fetching profiles for ${newUserIds.length} users`);
+    
+    // Mark these IDs as requested even before the request completes
+    newUserIds.forEach(id => profileRequestCache.current.add(id));
     
     try {
       const { data, error } = await supabase
-        .from('users')
-        .select('id, username, profile_pic, display_name') // Ensure display_name is selected
-        .in('id', uniqueUserIds);
+        .from('users')  // Use the correct table name
+        .select('id, username, profile_pic, display_name')
+        .in('id', newUserIds);
         
       if (error) {
         console.error('[ChannelScreen] Error fetching user profiles:', error);
         return;
       }
       
-      if (data && data.length) {
-        // Add log here to inspect fetched data
-        console.log('[FetchProfiles Debug] Data from Supabase:', JSON.stringify(data));
-
-        const newProfiles = data.reduce((acc, user) => {
-          acc[user.id] = {
-            username: user.username,
-            profile_pic: user.profile_pic,
-            displayName: user.display_name || null // Ensure it's being added
-          };
-          return acc;
-        }, {} as Record<string, { username: string; profile_pic: string; displayName: string | null }>);
-
-        // Add log here to inspect the object being added to state
-        console.log('[FetchProfiles Debug] newProfiles object:', JSON.stringify(newProfiles));
-
-        setUserProfiles(prev => ({ ...prev, ...newProfiles }));
+      if (!data || data.length === 0) {
+        console.log('[ChannelScreen] No user profiles found');
+        return;
       }
-    } catch (err) {
-      console.error('[ChannelScreen] Failed to fetch user profiles:', err);
+      
+      console.log(`[ChannelScreen] Found ${data.length} user profiles`);
+      
+      // Create a new object with just the new profiles
+      const newProfiles: Record<string, SupabaseUserData> = {};
+      data.forEach(profile => {
+        newProfiles[profile.id] = {
+          id: profile.id,
+          username: profile.username,
+          profile_pic: profile.profile_pic,
+          displayName: profile.display_name
+        };
+      });
+      
+      // Update the profiles state with merged data
+      setUserProfiles(prevProfiles => ({
+        ...prevProfiles,
+        ...newProfiles
+      }));
+      
+    } catch (error) {
+      console.error('[ChannelScreen] Error in profile fetch:', error);
     }
   }, [userProfiles]);
 
-  // Modify the fetchMessages function to get user profiles
-  const loadMessages = useCallback(async () => {
-    if (!id || !groupKey) return;
-    console.log(`[ChannelScreen] Loading messages for channel ${id}`);
-    
-    setIsLoading(true);
+  // Function to fetch the group key for a channel (keep this to fix linter errors)
+  const getGroupKeyForChannel = useCallback(async (channelId: string, userId: string): Promise<string | null> => {
+    console.log(`[ChannelScreen] Getting group key for channel ${channelId} and user ${userId}`);
+
     try {
-      const msgs = await fetchMessages(id as string, groupKey);
-      console.log(`[ChannelScreen] Retrieved ${msgs.length} messages`);
-      
-      // Log message details for debugging
-      if (msgs.length > 0) {
-        console.log(`[ChannelScreen] Message samples:`, 
-          msgs.slice(0, Math.min(3, msgs.length)).map(m => ({
-            id: m._id,
-            text: m.text?.substring(0, 20),
-            sender: m.user._id,
-            name: m.user.name
-        })));
+      // 1. Get garden_id for the channel
+      const { data: channel, error: channelError } = await supabase
+        .from('channels')
+        .select('garden_id')
+        .eq('id', channelId)
+        .single();
+        
+      if (channelError || !channel) {
+        console.error('[ChannelScreen] Failed to get garden_id for channel:', channelError);
+        return null;
       }
       
-      // Extract all unique user IDs from messages
-      const userIds = msgs
-        .map(msg => msg.user._id.toString())
-        .filter(id => id && id !== 'system');
-        
-      // Fetch user profiles if needed
-      await fetchUserProfiles(userIds);
+      console.log(`[ChannelScreen] Found garden_id: ${channel.garden_id}`);
       
-      // Enrich messages with user profile data
-      const enrichedMessages = msgs.map(msg => {
-        const userId = msg.user._id.toString();
-        const profile = userProfiles[userId];
+      // 2. Get encrypted key from memberships
+      const { data: membership, error: membershipError } = await supabase
+        .from('memberships')
+        .select('encrypted_group_key, user_id, garden_id')
+        .eq('garden_id', channel.garden_id)
+        .eq('user_id', userId)
+        .single();
         
-        if (profile) {
-          return {
-            ...msg,
-            user: {
-              ...msg.user,
-              name: profile.username || msg.user.name || 'Unknown User',
-              avatar: profile.profile_pic || msg.user.avatar || ''
-            }
-          };
+      if (membershipError || !membership) {
+        console.error('[ChannelScreen] Membership not found or missing key:', membershipError);
+        return null;
+      }
+      
+      console.log(`[ChannelScreen] Found membership with key: ${membership.encrypted_group_key ? 'present' : 'missing'}`);
+      
+      if (!membership.encrypted_group_key) {
+        console.error('[ChannelScreen] Membership found but encrypted_group_key is null or empty');
+        return null;
+      }
+      
+      // Log the first few characters of the key for debugging
+      const keyStr = membership.encrypted_group_key as string;
+      console.log(`[ChannelScreen] Retrieved key: ${keyStr.substring(0, 5)}...`);
+      
+      // Handle PostgreSQL bytea format (\x followed by hex)
+      if (keyStr.startsWith('\\x')) {
+        // Convert hex to base64
+        try {
+          console.log('[ChannelScreen] Converting hex key to base64');
+          const hexBody = keyStr.slice(2); // Remove \x prefix
+          const bytePairs = hexBody.match(/.{1,2}/g) || [];
+          const bytes = new Uint8Array(bytePairs.map(h => parseInt(h, 16)));
+          
+          // Convert to base64
+          let base64Key = '';
+          const binString = Array.from(bytes).map(b => String.fromCharCode(b)).join('');
+          base64Key = btoa(binString);
+          
+          console.log(`[ChannelScreen] Converted key: ${base64Key.substring(0, 5)}...`);
+          return base64Key;
+        } catch (e) {
+          console.error('[ChannelScreen] Error converting hex key:', e);
+          return null;
         }
-        
-        return msg;
-      });
+      }
       
-      setMessages(enrichedMessages);
-    } catch (error) {
-      console.error('[ChannelScreen] Error loading messages:', error);
-    } finally {
-      setIsLoading(false);
+      // Check if already a valid base64 string
+      const isValidBase64 = /^[A-Za-z0-9+/=]+$/.test(keyStr);
+      if (!isValidBase64) {
+        console.error('[ChannelScreen] Key is not a valid base64 string');
+        return null;
+      }
+      
+      return keyStr;
+    } catch (e) {
+      console.error('[ChannelScreen] Error getting group key:', e);
+      return null;
     }
-  }, [id, fetchMessages, groupKey, userProfiles, fetchUserProfiles]);
+  }, []);
 
-  // Replace the existing useEffect for message loading
-  useEffect(() => {
-    if (groupKey) {
-      loadMessages();
-    }
-  }, [groupKey, loadMessages]);
-
-  // Manual function to force key refresh if needed
-  const refreshKey = async () => {
+  // Manual function to force key refresh if needed - define before it's used in setupMessageHandling
+  const refreshKey = useCallback(async () => {
     if (!user || !id) return;
     
     try {
@@ -647,16 +741,197 @@ export default function ChannelScreen() {
       setGroupKey(key || null);
       setDebugInfo(key ? `KEY: ${key.substring(0, 5)}...` : 'NO KEY');
       
-      // Re-fetch messages with new key
-      const refreshedMsgs = await fetchMessages(id as string, key || undefined);
-      setMessages(refreshedMsgs);
+      // No need to re-fetch messages with the new key - the WebSocket handler will handle it
     } catch (e) {
       console.error('Failed to refresh key:', e);
       setDebugInfo(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setIsLoading(false);
     }
+  }, [user, id, getGroupKeyForChannel]);
+
+  // Add the removeDuplicateMessages helper function
+  const removeDuplicateMessages = (messages: IMessage[]): IMessage[] => {
+    const seen = new Set();
+    return messages.filter(msg => {
+      if (seen.has(msg._id)) {
+        return false;
+      }
+      seen.add(msg._id);
+      return true;
+    });
   };
+
+  // Fix the handleMessageHistory function to properly type parameters
+  const handleMessageHistory = useCallback((historyMessages: any[]) => {
+    if (!groupKey || !historyMessages.length) {
+      setIsLoading(false);
+      return;
+    }
+
+    console.log(`[ChannelScreen] Processing ${historyMessages.length} history messages`);
+    
+    // Process each message
+    const processedMessages = historyMessages
+      .filter(msg => msg && msg.ciphertext)
+      .map(msg => {
+        try {
+          // Decrypt message content
+          const decrypted = decryptMessage(msg.ciphertext, groupKey);
+          let payload;
+          
+          try {
+            payload = JSON.parse(decrypted);
+          } catch (parseErr) {
+            console.warn(`[ChannelScreen] Failed to parse JSON for message ${msg.id}:`, parseErr);
+            payload = { text: '[Encrypted message]' };
+          }
+          
+          return createMessageFromPayload(msg, payload);
+        } catch (decryptErr) {
+          console.error(`[ChannelScreen] Failed to decrypt message ${msg.id}:`, decryptErr);
+          return null;
+        }
+      })
+      .filter(Boolean);
+    
+    // Add to existing messages
+    setMessages(prevMessages => {
+      // Merge messages and remove duplicates
+      const combinedMessages = GiftedChat.append(prevMessages, processedMessages as IMessage[]);
+      const uniqueMessages = removeDuplicateMessages(combinedMessages);
+      
+      // Sort by createdAt descending (newest first)
+      return uniqueMessages.sort((a: IMessage, b: IMessage) => 
+        (new Date(b.createdAt).getTime()) - (new Date(a.createdAt).getTime())
+      );
+    });
+    
+    // Collect unique user IDs for profile fetching
+    const userIds = historyMessages
+      .map(msg => msg.senderId)
+      .filter(id => id && id !== user?.id && id !== 'system');
+    
+    if (userIds.length > 0) {
+      fetchUserProfiles([...new Set(userIds)]);
+    }
+    
+    setIsLoading(false);
+  }, [groupKey, user?.id, fetchUserProfiles]);
+
+  // Update the setupMessageHandling function to fix the 'error' linter error
+  const setupMessageHandling = useCallback(() => {
+    if (!daturaClient || !groupKey) return () => {};
+    
+    console.log('[ChannelScreen] Setting up WebSocket message handling');
+    
+    const messageHandler = (data: any) => {
+      try {
+        if (data.type === 'new_message') {
+          // Handle new real-time message
+          const msg = data.message;
+          console.log('[ChannelScreen] Received new message:', msg.id);
+          
+          // Decrypt and process the message
+          const decrypted = decryptMessage(msg.ciphertext, groupKey);
+          let payload;
+          
+          try {
+            payload = JSON.parse(decrypted);
+          } catch (parseError) {
+            console.warn(`[ChannelScreen] Failed to parse JSON for message ${msg.id}:`, parseError);
+            payload = { text: '[Encrypted message]' };
+          }
+          
+          // Create and add the new message
+          const newMessage = createMessageFromPayload(msg, payload);
+          
+          setMessages(prevMessages => {
+            // Check if message already exists
+            if (prevMessages.some(m => m._id === newMessage._id)) {
+              return prevMessages;
+            }
+            return GiftedChat.append(prevMessages, [newMessage]);
+          });
+          
+          // Fetch user profile if needed
+          if (msg.senderId && msg.senderId !== user?.id && msg.senderId !== 'system') {
+            fetchUserProfiles([msg.senderId]);
+          }
+        } 
+        else if (data.type === 'history_loaded') {
+          // Handle initial message history load
+          console.log(`[ChannelScreen] Received message history: ${data.messages.length} messages`);
+          handleMessageHistory(data.messages);
+        }
+        else if (data.type === 'key_rotated') {
+          // Handle key rotation
+          console.log('[ChannelScreen] Key rotation detected, refreshing key');
+          refreshKey();
+        }
+        else if (data.type === 'key_info') {
+          // Handle key information from server
+          console.log('[ChannelScreen] Received key info:', data.keyVersion);
+          // No need to do anything special here as the client will handle requesting history
+        }
+        else if (data.type === 'error') {
+          // Handle error message from server
+          console.error('[ChannelScreen] Server error:', data.message);
+          setDebugInfo(`ERROR: ${data.message || 'Unknown server error'}`);
+        }
+        else if (data.type === 'history_timeout') {
+          // Handle history request timeout
+          console.warn('[ChannelScreen] History request timed out');
+          setDebugInfo('History request timed out. Try refreshing.');
+          setIsLoading(false);
+        }
+      } catch (err) {
+        console.error('[ChannelScreen] Error processing WebSocket message:', err);
+      }
+    };
+    
+    daturaClient.onMessage(messageHandler);
+    
+    return () => {
+      // No explicit cleanup needed as the client handles this
+      console.log('[ChannelScreen] Cleaning up message handler');
+    };
+  }, [daturaClient, groupKey, user?.id, fetchUserProfiles, refreshKey, handleMessageHistory]);
+  
+  // Update the onSend function to match the DaturaClient sendMessage signature
+  const onSend = useCallback((newMessages: IMessage[] = []) => {
+    if (!daturaClient || !groupKey || !id) return;
+    
+    const message = newMessages[0];
+    
+    // Don't send empty messages
+    if (!message.text || message.text.trim().length === 0) {
+      console.log('[ChannelScreen] Not sending empty message');
+      return;
+    }
+    
+    console.log('[ChannelScreen] Sending message:', message.text);
+    
+    // Create message payload
+    const payload = {
+      text: message.text,
+      senderId: user?.id,
+      senderName: user?.username || 'Unknown User',
+      timestamp: new Date().toISOString(),
+    };
+    
+    // Encrypt the payload
+    const ciphertext = encryptMessage(JSON.stringify(payload), groupKey);
+    
+    // Send through WebSocket
+    daturaClient.sendMessage(ciphertext, {
+      messageType: 'Text'
+    }).then(messageId => {
+      console.log('[ChannelScreen] Message sent successfully, ID:', messageId);
+    }).catch(err => {
+      console.error('[ChannelScreen] Failed to send message:', err);
+    });
+  }, [daturaClient, groupKey, id, user?.id, user?.username]);
 
   // Request permissions for audio recording
   useEffect(() => {
@@ -779,7 +1054,7 @@ export default function ChannelScreen() {
   
   // Send the audio message
   const sendAudioMessage = async () => {
-    if (!recording.recordingUri || !user) return;
+    if (!recording.recordingUri || !user || !daturaClient || !groupKey) return;
     
     try {
       setIsLoading(true);
@@ -796,10 +1071,11 @@ export default function ChannelScreen() {
         return;
       }
 
-      const audioUrl = await uploadAudioMessage(recording.recordingUri, id as string);
+      // Convert to base64
+      const audioBase64 = await uploadMediaAsBase64(recording.recordingUri);
       
       // Create the message with audio content
-      const audioMessage: ExtendedMessage = {
+      const audioMessage: EnhancedMessage = {
         _id: Crypto.randomUUID(),
         text: '',
         createdAt: new Date(),
@@ -808,14 +1084,22 @@ export default function ChannelScreen() {
           name: user.username,
           avatar: user.profile_pic,
         },
-        audio: audioUrl,
+        audio: audioBase64,
       };
       
-      // Send to backend and update local state
-      await sendMessage(id as string, audioMessage, groupKey!);
+      // Add to messages immediately for UI responsiveness
       setMessages(previousMessages => 
         GiftedChat.append(previousMessages, [audioMessage] as IMessage[])
       );
+      
+      // Encrypt and send via Datura
+      const payload = {
+        text: '',
+        audio: audioBase64
+      };
+      
+      const encryptedPayload = encryptMessage(JSON.stringify(payload), groupKey);
+      await daturaClient.sendMessage(encryptedPayload, { messageType: 'Audio' });
       
       // Reset recording state
       setRecording({
@@ -834,7 +1118,7 @@ export default function ChannelScreen() {
   
   // Pick and send an image
   const handlePickImage = async () => {
-    if (!user) return;
+    if (!user || !daturaClient || !groupKey) return;
     
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     
@@ -865,11 +1149,11 @@ export default function ChannelScreen() {
           return;
         }
         
-        // Upload the image
-        const imageUrl = await uploadImageMessage(result.assets[0].uri, id as string);
+        // Upload the image (convert to base64)
+        const imageBase64 = await uploadMediaAsBase64(result.assets[0].uri);
         
         // Create and send the message
-        const imageMessage: ExtendedMessage = {
+        const imageMessage: EnhancedMessage = {
           _id: Crypto.randomUUID(),
           text: '',
           createdAt: new Date(),
@@ -878,13 +1162,22 @@ export default function ChannelScreen() {
             name: user.username,
             avatar: user.profile_pic,
           },
-          image: imageUrl,
+          image: imageBase64,
         };
         
-        await sendMessage(id as string, imageMessage, groupKey!);
+        // Add to messages immediately for UI responsiveness
         setMessages(previousMessages => 
           GiftedChat.append(previousMessages, [imageMessage] as IMessage[])
         );
+        
+        // Encrypt and send via Datura
+        const payload = {
+          text: '',
+          image: imageBase64
+        };
+        
+        const encryptedPayload = encryptMessage(JSON.stringify(payload), groupKey);
+        await daturaClient.sendMessage(encryptedPayload, { messageType: 'Image' });
       }
     } catch (error) {
       console.error('Failed to send image message', error);
@@ -892,6 +1185,16 @@ export default function ChannelScreen() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Delete a message
+  const deleteMessage = async (messageId: string): Promise<void> => {
+    // For now, we'll just remove it from the local state
+    // In a real implementation, you would need to send a delete request to the server
+    setMessages(prev => prev.filter(m => m._id !== messageId));
+    
+    // TODO: Implement server-side message deletion via Datura API when available
+    console.log(`[ChannelScreen] Message deleted locally: ${messageId}`);
   };
 
   // Handle long press on message for reply or delete
@@ -908,8 +1211,6 @@ export default function ChannelScreen() {
       actions.push(async () => {
         try {
           await deleteMessage(message._id as string);
-          // remove from local state
-          setMessages(prev => prev.filter(m => m._id !== message._id));
         } catch (e) {
           console.error('Failed to delete message', e);
           Alert.alert('Error', 'Failed to delete message');
@@ -923,164 +1224,195 @@ export default function ChannelScreen() {
     Alert.alert('Message Actions', '', options.map((opt, i) => ({ text: opt, onPress: actions[i], style: opt === 'Delete' ? 'destructive' : 'default' })), { cancelable: true });
   }, [channelUsers, isAdminUser, user]);
 
-  // Wrap bubble to handle long press
-  // REMOVE renderBubbleWithLongPress as bubbles are removed
-  // const renderBubbleWithLongPress = (props: any) => (
-  //   <TouchableOpacity
-  //     activeOpacity={0.8}
-  //     onLongPress={() => handleLongPressMessage(props, props.currentMessage)}
-  //   >
-  //     <Bubble {...props} />
-  //   </TouchableOpacity>
-  // );
-
-  // Render reply preview above composer
-  const renderAccessory = () => replyTo ? (
-    <View style={[styles.replyPreview, { backgroundColor: colorScheme === 'dark' ? '#333' : '#f0f0f0' }]}>
-      <TouchableOpacity onPress={() => setReplyTo(null)} style={styles.replyCancel}>
-        <Ionicons name="close" size={16} color={colors.secondaryText} />
-      </TouchableOpacity>
-      <Text style={[styles.replyUsername, { color: colors.primary }]}>
-        Replying to {replyTo.user.name}
-      </Text>
-      <Text numberOfLines={1} style={[styles.replyText, { color: colors.text }]}>
-        {replyTo.text || 'Media...' }
-      </Text>
-    </View>
-  ) : null;
-
-  // Update the getMentionSuggestions function for better logging and filtering
-  const getMentionSuggestions = useCallback(async (searchTerm: string) => {
-    console.log(`[Mention] Searching for users matching "${searchTerm}"`);
-    setMentionLoading(true);
+  // Add an effect to initialize channel and persist state
+  useEffect(() => {
+    if (!id || !user?.id) return;
     
-    try {
-      // If we already have channel users, filter them locally
-      if (channelUsers.length > 0) {
-        console.log(`[Mention] Filtering ${channelUsers.length} channel users`);
-        console.log(`[Mention] Channel users:`, channelUsers.map(u => u.username));
-        console.log(`[Mention] Current user ID:`, user?.id);
+    let mounted = true;
+    console.log(`[ChannelScreen] Initialization effect running for channel ${id}`);
+    
+    const initialize = async () => {
+      try {
+        console.log(`[ChannelScreen] Initializing Datura client for channel ${id}`);
+        const client = await initializeClient(id as string);
         
-        const filteredUsers = channelUsers.filter(
-          channelUser => channelUser.username.toLowerCase().includes(searchTerm.toLowerCase()) && 
-                  channelUser.id !== user?.id // Don't suggest the current user
-        );
-        console.log(`[Mention] Found ${filteredUsers.length} matching users`);
-        setMentionSuggestions(filteredUsers);
-        setMentionLoading(false);
-        return;
-      }
+        if (!mounted) return;
       
-      // Otherwise, fetch users from Supabase
-      console.log(`[Mention] Fetching users from Supabase matching "${searchTerm}"`);
-      const { data, error } = await supabase
-        .from('users')
-        .select('id, username, profile_pic, display_name')
-        .ilike('username', `%${searchTerm}%`)
-        .not('id', 'eq', user?.id) // Don't show the current user
-        .limit(5);
-      
-      if (error) {
-        console.error('[Mention] Error fetching mention suggestions:', error);
-        setMentionLoading(false);
-        return;
+        if (client) {
+          setDaturaClient(client);
+          console.log('[ChannelScreen] Datura client initialized successfully');
+          
+          // Explicitly set the channel ID to ensure it's correct
+          console.log(`[ChannelScreen] Setting channel ID in newly initialized client: ${id}`);
+          client.setChannelId(id as string);
+          
+          // Try to get the group key from context storage first
+          let key = getGroupKey(id as string);
+          
+          if (!key) {
+            try {
+              console.log(`[ChannelScreen] Getting group key for channel ${id} and user ${user.id}`);
+              key = await getGroupKeyForChannel(id as string, user.id);
+              
+              if (!mounted) return;
+              
+              if (key) {
+                // Store the key in context storage
+                storeGroupKey(id as string, key);
+                console.log(`[ChannelScreen] Successfully stored group key for channel ${id}`);
+              } else {
+                console.warn(`[ChannelScreen] Failed to get group key for channel ${id}`);
+              }
+            } catch (e) {
+              console.error('[ChannelScreen] Failed to get group key:', e);
+              setDebugInfo(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          } else {
+            console.log(`[ChannelScreen] Using stored group key for channel ${id}`);
+          }
+          
+          setGroupKey(key);
+          setDebugInfo(key ? `KEY: ${key.substring(0, 5)}...` : 'NO KEY');
+          
+          // Verify that the channel ID is still set correctly
+          const clientChannelId = client.getChannelId();
+          console.log(`[ChannelScreen] Verification - Client's channel ID: ${clientChannelId}`);
+          if (clientChannelId !== id) {
+            console.warn(`[ChannelScreen] Channel ID mismatch after initialization. Re-setting to ${id}`);
+            client.setChannelId(id as string);
+          }
+        } else {
+          console.warn('[ChannelScreen] Failed to initialize Datura client');
+        }
+      } catch (error) {
+        console.error('[ChannelScreen] Error initializing Datura client:', error);
+      } finally {
+        // Set loading to false after initialization is complete (success or failure)
+        if (mounted) {
+          setIsLoading(false);
+        }
       }
-      
-      if (data && data.length) {
-        console.log(`[Mention] Found ${data.length} users from Supabase`);
-        const formattedUsers = data.map(user => ({
-          id: user.id,
-          username: user.username || 'User',
-          avatar: user.profile_pic || '',
-          displayName: user.display_name || null,
-          status: 'online' as const,
-        }));
-        
-        setMentionSuggestions(formattedUsers);
-      } else {
-        console.log('[Mention] No users found');
-        setMentionSuggestions([]);
-      }
-    } catch (error) {
-      console.error('[Mention] Error getting mention suggestions:', error);
-      setMentionSuggestions([]);
-    } finally {
-      setMentionLoading(false);
-    }
-  }, [channelUsers, user?.id]);
-
-  // Improve handleInputTextChanged for better mention detection
-  const handleInputTextChanged = useCallback((text: string) => {
-    setCurrentTextInput(text);
-    console.log(`[Mention] Input text changed: "${text}"`);
+    };
     
-    // Check if user is typing a mention
-    const lastAtSymbolIndex = text.lastIndexOf('@');
-    if (lastAtSymbolIndex !== -1) {
-      // Check if @ is at the start of the text or after a space
-      if (lastAtSymbolIndex === 0 || text[lastAtSymbolIndex - 1] === ' ') {
-        const query = text.substring(lastAtSymbolIndex + 1);
-        console.log(`[Mention] Detected @ at index ${lastAtSymbolIndex}, query: "${query}"`);
-        setMentionStartIndex(lastAtSymbolIndex);
-        getMentionSuggestions(query);
-        return;
-      }
-    }
+    initialize();
     
-    // If we're not currently typing a mention, clear suggestions
-    if (mentionSuggestions.length > 0) {
-      console.log('[Mention] Clearing suggestions');
-      setMentionSuggestions([]);
-      setMentionStartIndex(-1);
-    }
-  }, [getMentionSuggestions, mentionSuggestions.length]);
-
-  // Handle selecting a user from mention suggestions
-  const handleSelectMention = useCallback((user: ChannelUser) => {
-    if (mentionStartIndex === -1) return;
-    
-    // Replace the @query with @username
-    const beforeMention = currentTextInput.substring(0, mentionStartIndex);
-    const afterMention = currentTextInput.substring(mentionStartIndex + 1 + (currentTextInput.substring(mentionStartIndex + 1).split(' ')[0]).length);
-    const newText = `${beforeMention}@${user.username} ${afterMention}`;
-    
-    // Update the text input
-    setCurrentTextInput(newText);
-    
-    // Add user to mentioned users list
-    setMentionedUsers(prev => [...prev.filter(id => id !== user.id), user.id]);
-    
-    // Clear suggestions
-    setMentionSuggestions([]);
-    setMentionStartIndex(-1);
-  }, [mentionStartIndex, currentTextInput]);
+    // Cleanup function
+    return () => {
+      console.log(`[ChannelScreen] Cleaning up initialization effect for channel ${id}`);
+      mounted = false;
+    };
+  }, [id, user?.id, initializeClient, getGroupKey, storeGroupKey, getGroupKeyForChannel]);
   
-  // Modified onSend function to include mentioned users
-  const onSend = useCallback(async (messages: IMessage[] = []) => {
-    if (messages.length === 0 || channelLocked) return;
+  // Add an effect to handle WebSocket reconnections
+  useEffect(() => {
+    if (!daturaClient || !id) return;
     
-    try {
-      const messageToSend = {
-        ...messages[0],
-        user: {
-          _id: user?.id || '',
-          name: user?.username || '',
-          avatar: user?.profile_pic || '',
-        },
-        garden: garden || undefined,
-        mentioned_users: mentionedUsers.length > 0 ? mentionedUsers : undefined,
-      };
+    // Force channelId to be correct on every mount/update
+    console.log(`[ChannelScreen] Ensuring channel ID is set to: ${id}`);
+    daturaClient.setChannelId(id as string);
+    
+    // Set up a periodic check for the WebSocket connection
+    const checkInterval = setInterval(() => {
+      const isConnected = daturaClient.isConnected();
+      const currentChannelId = daturaClient.getChannelId();
       
-      await sendMessage(id as string, messageToSend as ExtendedMessage, groupKey!);
+      setWsConnected(isConnected);
       
-      // Reset mentioned users after sending
-      setMentionedUsers([]);
-      setCurrentTextInput('');
-    } catch (e) {
-      console.error('[ChannelScreen] Failed to send message:', e);
-      Alert.alert('Error', 'Failed to send message. Please try again.');
+      console.log(`[ChannelScreen] Connection check - Connected: ${isConnected}, ChannelID: ${currentChannelId}`);
+      
+      if (!isConnected) {
+        console.log('[ChannelScreen] WebSocket disconnected, attempting reconnect');
+        
+        // Ensure channelId is set before reconnecting
+        if (currentChannelId !== id) {
+          console.log(`[ChannelScreen] Channel ID mismatch: current=${currentChannelId}, expected=${id}`);
+          daturaClient.setChannelId(id as string);
+        }
+        
+        daturaClient.reconnect();
+      }
+    }, 5000);
+    
+    return () => {
+      console.log('[ChannelScreen] Cleaning up WebSocket reconnection interval');
+      clearInterval(checkInterval);
+    };
+  }, [daturaClient, id]);
+
+  // Set up message subscription when client and key are available
+  useEffect(() => {
+    if (!daturaClient || !groupKey || !setupCompleted.current) {
+        return;
     }
-  }, [id, sendMessage, user, garden, groupKey, channelLocked, mentionedUsers]);
+    
+    // Define the message subscription setup function inline
+    const setupMessageSubscription = () => {
+      console.log('[ChannelScreen] Setting up live subscription for channel', id);
+      
+      if (!daturaClient) {
+        console.warn('[ChannelScreen] No Datura client available for real-time messages');
+        return () => {}; // Return empty cleanup function
+      }
+      
+      console.log('[ChannelScreen] Using Datura client for real-time messages');
+      
+      // Set up message handler
+      daturaClient.onMessage((data) => {
+        if (data.type === 'new_message') {
+          console.log('[ChannelScreen] Received new message');
+          
+          // Process incoming message
+          const msg = data.message;
+          
+          if (msg && groupKey) {
+            try {
+              // Decrypt the message
+              const payloadStr = decryptMessage(msg.ciphertext, groupKey);
+              const payload = JSON.parse(payloadStr);
+              
+              // Create message object
+              const newMessage = createMessageFromPayload(msg, payload);
+              
+              // Add to messages state
+              setMessages(prev => GiftedChat.append(prev, [newMessage]));
+              
+              // Fetch user profile for the sender
+              if (msg.senderId) {
+                fetchUserProfiles([msg.senderId]);
+              }
+            } catch (err) {
+              console.error('[ChannelScreen] Error processing live message:', err);
+            }
+          }
+        }
+      });
+      
+      // Return cleanup function
+      return () => {
+        console.log('[ChannelScreen] Cleaning up message subscription');
+      };
+    };
+    
+    const unsubscribe = setupMessageSubscription();
+        
+    return unsubscribe;
+  }, [daturaClient, groupKey, id, fetchUserProfiles, decryptMessage]);
+  
+  // Add a safety effect to clear loading state after a timeout
+  useEffect(() => {
+    if (isLoading) {
+      // Set a timeout to clear loading state if it gets stuck
+      const timer = setTimeout(() => {
+        console.log('[ChannelScreen] Safety timeout: clearing loading state');
+        setIsLoading(false);
+      }, 10000); // 10 seconds timeout
+      
+      return () => clearTimeout(timer);
+    }
+  }, [isLoading]);
+  
+  // Remove the separate effect for getting the group key since we now do it in the initialization
+  // effect
 
   // Handle avatar press
   const onAvatarPress = (avatarUser: any) => {
@@ -1100,7 +1432,7 @@ export default function ChannelScreen() {
   // Navigation to DM from profile modal
   const navigateToDM = (userId: string) => {
     setProfileModalVisible(false);
-    router.push(`/(tabs)/dm/${userId}`);
+    router.push(`/dm/${userId}`);
   };
 
   // Custom user avatar with online status indicator
@@ -1778,7 +2110,7 @@ export default function ChannelScreen() {
   };
 
   // Drawer component
-  const renderDrawer = () => {
+  const renderDrawer = useCallback(() => {
     if (!drawerVisible) return null;
     
     return (
@@ -1832,10 +2164,10 @@ export default function ChannelScreen() {
         </Animated.View>
       </View>
     );
-  };
+  }, [drawerVisible, colorScheme, drawerAnimation, channel?.name, channel?.description, channelUsers, colors.text, colors.secondaryText, closeDrawer]);
 
   // Toggle info dropdown with type-safe implementation
-  const toggleInfoBox = () => {
+  const toggleInfoBox = useCallback(() => {
     if (!infoVisible && infoButtonRef.current) {
       // Measure the position of the info button to position the dropdown
       infoButtonRef.current.measure?.((x, y, width, height, pageX, pageY) => {
@@ -1848,10 +2180,10 @@ export default function ChannelScreen() {
     } else {
       setInfoVisible(false);
     }
-  };
+  }, [infoVisible]);
 
   // Info box component - replaces the modal
-  const renderInfoBox = () => {
+  const renderInfoBox = useCallback(() => {
     if (!infoVisible) return null;
     
     return (
@@ -1884,7 +2216,7 @@ export default function ChannelScreen() {
         </Animated.View>
       </View>
     );
-  };
+  }, [infoVisible, colorScheme, infoPosition.top, infoPosition.right, colors.primary, colors.text, colors.secondaryText]);
 
   // Profile modal when clicking on avatar
   const renderProfileModal = () => {
@@ -1955,7 +2287,7 @@ export default function ChannelScreen() {
   };
 
   // Updated render header function
-  const renderHeader = () => {
+  const renderHeader = useCallback(() => {
     return (
       <View style={[styles.header, { backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#FFFFFF' }]}>
         <TouchableOpacity 
@@ -1984,20 +2316,14 @@ export default function ChannelScreen() {
             <Ionicons name="menu" size={22} color={colors.primary} />
           </TouchableOpacity>
           
-          <TouchableOpacity 
-            ref={infoButtonRef}
-            style={styles.headerInfo} 
-            onPress={toggleInfoBox}
-          >
-            <Ionicons name="information-circle-outline" size={22} color={colors.primary} />
-          </TouchableOpacity>
+          {renderHeaderRight()}
         </View>
       </View>
     );
-  };
+  }, [colorScheme, colors.text, colors.primary, colors.secondaryText, channel?.name, garden?.name, channelLocked]);
 
   // Improve the debug display with more info and a refresh button
-  const renderDebugInfo = () => (
+  const renderDebugInfo = useCallback(() => (
     <View style={{ 
       position: 'absolute', 
       top: 100, 
@@ -2015,7 +2341,7 @@ export default function ChannelScreen() {
         </Text>
       </TouchableOpacity>
     </View>
-  );
+  ), [isLoading, messages.length, debugInfo, refreshKey]);
 
   // Custom render for system messages including admin notifications
   const renderSystemMessage = (props: any) => {
@@ -2057,9 +2383,18 @@ export default function ChannelScreen() {
               actionRequired={actionRequired}
               gardenId={channel?.garden_id || ''}
               onAction={() => {
-                // Refresh messages after action
-                fetchMessages(id as string, groupKey || undefined)
-                  .then(msgs => setMessages(msgs));
+                // Refresh message history after action
+                if (daturaClient && groupKey) {
+                  // Request new message history instead of calling loadMessages
+                  console.log('[ChannelScreen] Requesting fresh message history after admin action');
+                  daturaClient.getMessageHistory(50)
+                    .then(historyMessages => {
+                      handleMessageHistory(historyMessages);
+                    })
+                    .catch(error => {
+                      console.error('[ChannelScreen] Error refreshing messages after admin action:', error);
+                    });
+                }
               }}
             />
           );
@@ -2100,67 +2435,15 @@ export default function ChannelScreen() {
         try {
           console.log(`[ChannelScreen] Setting up live subscription for channel ${id}`);
           
-          // Set up subscription for real-time updates
-          unsub = await subscribeToChannel(id as string, async (newMsgs) => {
-            console.log(`[ChannelScreen] Received ${newMsgs.length} new messages from subscription`);
-            
-            // Log the sender IDs to debug
-            if (newMsgs.length > 0) {
-              console.log(`[ChannelScreen] Message sender IDs: ${newMsgs.map(m => m.user._id).join(', ')}`);
-            }
-            
-            // Extract user IDs from the new messages
-            const userIds = newMsgs
-              .map(msg => msg.user._id.toString())
-              .filter(id => id && id !== 'system');
-            
-            // Fetch any missing user profiles
-            await fetchUserProfiles(userIds);
-            
-            // Enrich the new messages with user profile data
-            const enrichedNewMsgs = newMsgs.map(msg => {
-              const userId = msg.user._id.toString();
-              const profile = userProfiles[userId];
-              
-              if (profile) {
-                return {
-                  ...msg,
-                  user: {
-                    ...msg.user,
-                    name: profile.username || msg.user.name || 'Unknown User',
-                    avatar: profile.profile_pic || msg.user.avatar || ''
-                  }
-                };
-              }
-              
-              return msg;
-            });
-            
-            // With Supabase Realtime, we need to handle messages differently
-            // Each message should be added to the state
-            setMessages(prev => {
-              // Create a map of existing messages by ID for faster lookup
-              const existingMsgs = new Map(prev.map(m => [m._id, m]));
-              
-              // Add any new messages not already in the list
-              enrichedNewMsgs.forEach(msg => {
-                // Check if we already have this message to avoid duplicates
-                if (!existingMsgs.has(msg._id)) {
-                  console.log(`[ChannelScreen] Adding new message: ${msg._id}`);
-                  existingMsgs.set(msg._id, msg);
-                } else {
-                  console.log(`[ChannelScreen] Skipping duplicate message: ${msg._id}`);
-                }
-              });
-              
-              // Convert back to array and sort by date (newest first for GiftedChat)
-              const sorted = Array.from(existingMsgs.values())
-                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-              
-              console.log(`[ChannelScreen] Updated messages: now have ${sorted.length} total`);
-              return sorted;
-            });
-          });
+          // With daturaClient, we don't need this anymore - using setupMessageSubscription instead
+          if (daturaClient) {
+            console.log(`[ChannelScreen] Using Datura client for real-time messages`);
+            return;
+          }
+          
+          // If no Datura client, we should show a warning
+          console.warn(`[ChannelScreen] No Datura client available for real-time messages`);
+          
         } catch (e) {
           console.error('[ChannelScreen] Failed to setup subscription:', e);
         }
@@ -2170,11 +2453,11 @@ export default function ChannelScreen() {
     // Cleanup subscription on unmount
     return () => {
       if (unsub) {
-        console.log('[ChannelScreen] Cleaning up subscription');
+        console.log('[ChannelScreen] Cleaning up message subscription');
         unsub();
       }
     };
-  }, [id, groupKey, userProfiles, fetchUserProfiles]);
+  }, [id, groupKey, daturaClient]);
   
   // Add an initial effect to get the group key when user ID is available
   useEffect(() => {
@@ -2193,7 +2476,7 @@ export default function ChannelScreen() {
     };
     
     getKey();
-  }, [id, user]);
+  }, [id, user, getGroupKeyForChannel]);
 
   // Slack style: Helper to check if the message is from the current user
   const isCurrentUser = (message: IMessage) => message.user._id === user?.id;
@@ -2281,6 +2564,171 @@ export default function ChannelScreen() {
 
   // Generate the styles once
   const componentStyles = getComponentStyles();
+
+  // Add getMentionSuggestions function back
+  const getMentionSuggestions = useCallback(async (searchTerm: string) => {
+    console.log(`[Mention] Searching for users matching "${searchTerm}"`);
+    setMentionLoading(true);
+    
+    try {
+      // If we already have channel users, filter them locally
+      if (channelUsers.length > 0) {
+        console.log(`[Mention] Filtering ${channelUsers.length} channel users`);
+        
+        const filteredUsers = channelUsers.filter(
+          channelUser => channelUser.username.toLowerCase().includes(searchTerm.toLowerCase()) && 
+                  channelUser.id !== user?.id // Don't suggest the current user
+        );
+        console.log(`[Mention] Found ${filteredUsers.length} matching users`);
+        setMentionSuggestions(filteredUsers);
+        setMentionLoading(false);
+        return;
+      }
+      
+      // Otherwise, fetch users from Supabase
+      console.log(`[Mention] Fetching users from Supabase matching "${searchTerm}"`);
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, username, profile_pic, display_name')
+        .ilike('username', `%${searchTerm}%`)
+        .not('id', 'eq', user?.id) // Don't show the current user
+        .limit(5);
+      
+      if (error) {
+        console.error('[Mention] Error fetching mention suggestions:', error);
+        setMentionLoading(false);
+        return;
+      }
+      
+      if (data && data.length) {
+        console.log(`[Mention] Found ${data.length} users from Supabase`);
+        const formattedUsers = data.map(user => ({
+          id: user.id,
+          username: user.username || 'User',
+          avatar: user.profile_pic || '',
+          displayName: user.display_name || null,
+          status: 'online' as const,
+        }));
+        
+        setMentionSuggestions(formattedUsers);
+      } else {
+        console.log('[Mention] No users found');
+        setMentionSuggestions([]);
+      }
+    } catch (error) {
+      console.error('[Mention] Error getting mention suggestions:', error);
+      setMentionSuggestions([]);
+    } finally {
+      setMentionLoading(false);
+    }
+  }, [channelUsers, user?.id]);
+
+  // Add handleInputTextChanged back
+  const handleInputTextChanged = useCallback((text: string) => {
+    setCurrentTextInput(text);
+    console.log(`[Mention] Input text changed: "${text}"`);
+    
+    // Check if user is typing a mention
+    const lastAtSymbolIndex = text.lastIndexOf('@');
+    if (lastAtSymbolIndex !== -1) {
+      // Check if @ is at the start of the text or after a space
+      if (lastAtSymbolIndex === 0 || text[lastAtSymbolIndex - 1] === ' ') {
+        const query = text.substring(lastAtSymbolIndex + 1);
+        console.log(`[Mention] Detected @ at index ${lastAtSymbolIndex}, query: "${query}"`);
+        setMentionStartIndex(lastAtSymbolIndex);
+        getMentionSuggestions(query);
+        return;
+      }
+    }
+    
+    // If we're not currently typing a mention, clear suggestions
+    if (mentionSuggestions.length > 0) {
+      console.log('[Mention] Clearing suggestions');
+      setMentionSuggestions([]);
+      setMentionStartIndex(-1);
+    }
+  }, [getMentionSuggestions, mentionSuggestions.length]);
+
+  // Add handleSelectMention back
+  const handleSelectMention = useCallback((user: ChannelUser) => {
+    if (mentionStartIndex === -1) return;
+    
+    // Replace the @query with @username
+    const beforeMention = currentTextInput.substring(0, mentionStartIndex);
+    const afterMention = currentTextInput.substring(mentionStartIndex + 1 + (currentTextInput.substring(mentionStartIndex + 1).split(' ')[0]).length);
+    const newText = `${beforeMention}@${user.username} ${afterMention}`;
+    
+    // Update the text input
+    setCurrentTextInput(newText);
+    
+    // Add user to mentioned users list
+    setMentionedUsers(prev => [...prev.filter(id => id !== user.id), user.id]);
+    
+    // Clear suggestions
+    setMentionSuggestions([]);
+    setMentionStartIndex(-1);
+  }, [mentionStartIndex, currentTextInput]);
+
+  // Render reply preview above composer
+  const renderAccessory = () => replyTo ? (
+    <View style={[styles.replyPreview, { backgroundColor: colorScheme === 'dark' ? '#333' : '#f0f0f0' }]}>
+      <TouchableOpacity onPress={() => setReplyTo(null)} style={styles.replyCancel}>
+        <Ionicons name="close" size={16} color={colors.secondaryText} />
+      </TouchableOpacity>
+      <Text style={[styles.replyUsername, { color: colors.primary }]}>
+        Replying to {replyTo.user.name}
+      </Text>
+      <Text numberOfLines={1} style={[styles.replyText, { color: colors.text }]}>
+        {replyTo.text || 'Media...' }
+      </Text>
+    </View>
+  ) : null;
+
+  // Add specific debug useEffect for channel ID
+  useEffect(() => {
+    console.log('[ChannelScreen DEBUG] Current channel ID:', id);
+    
+    // Try to verify if this channel exists in Supabase
+    const checkChannelExists = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('channels')
+          .select('id, name, garden_id')
+          .eq('id', id)
+          .single();
+          
+        if (error) {
+          console.error('[ChannelScreen DEBUG] Channel lookup error:', error);
+          console.log('[ChannelScreen DEBUG] Channel may not exist in Supabase:', id);
+        } else {
+          console.log('[ChannelScreen DEBUG] Channel exists in Supabase:', data?.id);
+          console.log('[ChannelScreen DEBUG] Channel name:', data?.name);
+          console.log('[ChannelScreen DEBUG] Garden ID:', data?.garden_id);
+        }
+      } catch (err) {
+        console.error('[ChannelScreen DEBUG] Error checking channel:', err);
+      }
+    };
+    
+    checkChannelExists();
+  }, [id]);
+
+  
+  // Add the debug button to the header right
+  const renderHeaderRight = useCallback(() => (
+    <View style={{ flexDirection: 'row' }}>
+      <TouchableOpacity 
+        ref={infoButtonRef}
+        onPress={toggleInfoBox}
+      >
+        <Ionicons 
+          name={infoVisible ? "close-circle-outline" : "information-circle-outline"} 
+          size={24} 
+          color={colors.text} 
+        />
+      </TouchableOpacity>
+    </View>
+  ), [infoVisible, colors.text, toggleInfoBox]);
 
   return (
     <View
@@ -2397,197 +2845,194 @@ export default function ChannelScreen() {
       {/* Profile Modal */}
       {renderProfileModal()}
       
-      {isLoading && messages.length === 0 ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
+      {/* Always show chat UI, remove loading skeleton completely */}
+      <View style={[styles.flex, { paddingBottom: 0, marginBottom: 0 }]}>
+        {/* Connection indicator */}
+        <View style={styles.connectionIndicator}>
+          <View style={[
+            styles.connectionDot, 
+            { backgroundColor: wsConnected ? '#4CAF50' : '#F44336' }
+          ]} />
         </View>
-      ) : (
-        <View style={[styles.flex, { paddingBottom: 0, marginBottom: 0 }]}>
-          {/* Custom Messages Container */}
-          <FlatList
-            data={messages}
-            keyExtractor={item => item._id.toString()}
-            renderItem={({ item }): React.ReactElement | null => { // Ensure return type includes null
-              // System messages have their own renderer
-              if (item.user._id === 'system') {
-                const systemMessageElement = renderSystemMessage({ currentMessage: item });
-                // Directly return the element or null if it's not a valid element
-                return React.isValidElement(systemMessageElement) ? systemMessageElement : null;
-              }
+        
+        {/* Custom Messages Container */}
+        <FlatList
+          data={messages}
+          keyExtractor={item => item._id.toString()}
+          renderItem={({ item }): React.ReactElement | null => { // Ensure return type includes null
+            // System messages have their own renderer
+            if (item.user._id === 'system') {
+              const systemMessageElement = renderSystemMessage({ currentMessage: item });
+              // Directly return the element or null if it's not a valid element
+              return React.isValidElement(systemMessageElement) ? systemMessageElement : null;
+            }
 
-              const messageProps = {
-                currentMessage: item,
-                nextMessage: undefined, // Could potentially use next/prev messages for grouping like Slack later
-                previousMessage: undefined,
-                position: isCurrentUser(item) ? 'right' : 'left', // Add position back
-                user: { // Keep gifted-chat's user structure for compatibility
-                  _id: user?.id || '',
-                  name: user?.username || '',
-                  avatar: user?.profile_pic || '',
-                },
-                // Remove position prop as it's not driving layout anymore
-                // position: isCurrentUser(item) ? 'right' : 'left',
-              };
+            const messageProps = {
+              currentMessage: item,
+              nextMessage: undefined, // Could potentially use next/prev messages for grouping like Slack later
+              previousMessage: undefined,
+              position: isCurrentUser(item) ? 'right' : 'left', // Add position back
+              user: { // Keep gifted-chat's user structure for compatibility
+                _id: user?.id || '',
+                name: user?.username || '',
+                avatar: user?.profile_pic || '',
+              },
+              // Remove position prop as it's not driving layout anymore
+              // position: isCurrentUser(item) ? 'right' : 'left',
+            };
 
-              const profile = getUserProfile(item.user._id.toString());
-              const currentUserCheck = isCurrentUser(item); // Get the result
+            const profile = getUserProfile(item.user._id.toString());
+            const currentUserCheck = isCurrentUser(item); // Get the result
 
-              // Add this detailed log
-              console.log(
-                `[RenderItem Header Check] Msg ID: ${item._id}, ` +
-                `Sender ID: ${item.user._id}, Current User ID: ${user?.id}, ` +
-                `Is Current User: ${currentUserCheck}, ` +
-                `Profile Exists: ${!!profile}, ` +
-                `Profile DisplayName: ${profile?.displayName}, ` +
-                `Profile Username: ${profile?.username}`
-              );
+            // Add this detailed log
+            console.log(
+              `[RenderItem Header Check] Msg ID: ${item._id}, ` +
+              `Sender ID: ${item.user._id}, Current User ID: ${user?.id}, ` +
+              `Is Current User: ${currentUserCheck}, ` +
+              `Profile Exists: ${!!profile}, ` +
+              `Profile DisplayName: ${profile?.displayName}, ` +
+              `Profile Username: ${profile?.username}`
+            );
 
-              return (
-                <View style={styles.slackMessageContainer}>
-                  {/* Avatar always on the left */}
-                  <View style={styles.slackAvatarWrapper}>
-                    {renderAvatar(messageProps)}
+            return (
+              <View style={styles.slackMessageContainer}>
+                {/* Avatar always on the left */}
+                <View style={styles.slackAvatarWrapper}>
+                  {renderAvatar(messageProps)}
+                </View>
+
+                {/* Content area */}
+                <TouchableOpacity
+                  style={styles.slackContentWrapper}
+                  activeOpacity={0.8}
+                  onLongPress={() => handleLongPressMessage(null, item)} // Pass context=null or adjust handler
+                >
+                  {/* Username/Timestamp Row (now always shown) */}
+                  <View style={styles.slackHeaderRow}>
+                    <Text style={[styles.slackUsername, { color: colors.text }]}>
+                      {/* Render displayName if available, otherwise username */}
+                      {profile.displayName ? profile.displayName : (profile.username || item.user.name || 'User')}
+                    </Text>
+                    {/* Timestamp removed as requested */}
+                    {/* <Text style={[styles.slackTimestamp, { color: colors.secondaryText }]}>
+                        {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                    </Text> */}
                   </View>
 
-                  {/* Content area */}
-                  <TouchableOpacity
-                    style={styles.slackContentWrapper}
-                    activeOpacity={0.8}
-                    onLongPress={() => handleLongPressMessage(null, item)} // Pass context=null or adjust handler
-                  >
-                    {/* Username/Timestamp Row (now always shown) */}
-                    <View style={styles.slackHeaderRow}>
-                      <Text style={[styles.slackUsername, { color: colors.text }]}>
-                        {/* Render displayName if available, otherwise username */}
-                        {profile.displayName ? profile.displayName : (profile.username || item.user.name || 'User')}
-                      </Text>
-                      {/* Timestamp removed as requested */}
-                      {/* <Text style={[styles.slackTimestamp, { color: colors.secondaryText }]}>
-                          {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                      </Text> */}
-                    </View>
-
-                    {/* Message Content (Text, Image, Video, Audio) */}
-                    <View style={styles.slackMessageContent}>
-                      {item.image ? renderMessageImage(messageProps) :
-                       item.video ? renderMessageVideo(messageProps) :
-                       item.audio ? renderMessageAudio(messageProps) :
-                       renderMessageText(messageProps) // Use MessageText directly
-                      }
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              );
-            }}
-            inverted={true}
-            contentContainerStyle={{
-              flexGrow: 1,
-              paddingBottom: 0,
-              marginBottom: 0,
-            }}
-            style={{
-              flex: 1,
-              marginBottom: 0,
-              paddingBottom: 0,
-            }}
-            showsVerticalScrollIndicator={false}
-            onEndReached={() => {
-              // You can implement loading more messages here if needed
-              console.log("Reached end of messages");
-            }}
-            onEndReachedThreshold={0.1}
-            initialNumToRender={15}
-            maxToRenderPerBatch={10}
-            windowSize={10}
-          />
-          
-          {/* Custom Input Bar */}
-          <View style={[styles.inputContainer, { 
-            backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
-            borderTopColor: colors.border,
-          }]}>
-            {mentionSuggestions.length > 0 && renderMentionSuggestions()}
-            
-            <View style={styles.inputRow}>
-              {/* Attachment Button */}
-              <TouchableOpacity 
-                style={styles.attachButton}
-                onPress={handlePickImage}
-              >
-                <Ionicons name="attach" size={24} color={colors.primary} />
-              </TouchableOpacity>
-              
-              {/* Text Input */}
-              <View style={[
-                styles.textInputContainer, 
-                { backgroundColor: colorScheme === 'dark' ? '#2A2A2C' : '#FFFFFF' }
-              ]}>
-                <TextInput
-                  style={[
-                    styles.textInput,
-                    { color: colors.text }
-                  ]}
-                  placeholder="Type a message... Use @ to mention"
-                  placeholderTextColor={colorScheme === 'dark' ? '#6E6E72' : '#A9A9AD'}
-                  multiline
-                  value={currentTextInput}
-                  onChangeText={handleInputTextChanged}
-                  selectionColor={colors.primary}
-                />
+                  {/* Message Content (Text, Image, Video, Audio) */}
+                  <View style={styles.slackMessageContent}>
+                    {item.image ? renderMessageImage(messageProps) :
+                     item.video ? renderMessageVideo(messageProps) :
+                     item.audio ? renderMessageAudio(messageProps) :
+                     renderMessageText(messageProps) // Use MessageText directly
+                    }
+                  </View>
+                </TouchableOpacity>
               </View>
-              
-              {/* Send Button */}
-              <TouchableOpacity 
+            );
+          }}
+          inverted={true}
+          contentContainerStyle={styles.messagesContainer}
+          // Add custom ListEmptyComponent for when there are no messages
+          ListEmptyComponent={() => (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="chatbubble-ellipses-outline" size={50} color={colors.secondaryText} />
+              <Text style={[styles.emptyText, { color: colors.text }]}>
+                No messages yet
+              </Text>
+              <Text style={[styles.emptySubtext, { color: colors.secondaryText }]}>
+                Be the first to send a message!
+              </Text>
+            </View>
+          )}
+        />
+        
+        {/* Custom Input Bar */}
+        <View style={[styles.inputContainer, { 
+          backgroundColor: colorScheme === 'dark' ? '#1C1C1E' : '#F2F2F7',
+          borderTopColor: colors.border,
+        }]}>
+          {mentionSuggestions.length > 0 && renderMentionSuggestions()}
+          
+          <View style={styles.inputRow}>
+            {/* Attachment Button */}
+            <TouchableOpacity 
+              style={styles.attachButton}
+              onPress={handlePickImage}
+            >
+              <Ionicons name="attach" size={24} color={colors.primary} />
+            </TouchableOpacity>
+            
+            {/* Text Input */}
+            <View style={[
+              styles.textInputContainer, 
+              { backgroundColor: colorScheme === 'dark' ? '#2A2A2C' : '#FFFFFF' }
+            ]}>
+              <TextInput
                 style={[
-                  styles.sendButton,
-                  {backgroundColor: currentTextInput.trim().length > 0 ? colors.primary : '#A0A0A8'}
-                ]} 
-                onPress={() => {
-                  if (currentTextInput.trim().length > 0) {
-                    const messages = [{
-                      _id: Crypto.randomUUID(),
-                      text: currentTextInput,
-                      createdAt: new Date(),
-                      user: {
-                        _id: user?.id || '',
-                        name: user?.username || '',
-                        avatar: user?.profile_pic || '',
-                      },
-                    }];
-                    onSend(messages);
-                  }
-                }}
-                disabled={currentTextInput.trim().length === 0}
-              >
-                <Ionicons name="send" size={18} color="white" />
-              </TouchableOpacity>
+                  styles.textInput,
+                  { color: colors.text }
+                ]}
+                placeholder="Type a message... Use @ to mention"
+                placeholderTextColor={colorScheme === 'dark' ? '#6E6E72' : '#A9A9AD'}
+                multiline
+                value={currentTextInput}
+                onChangeText={handleInputTextChanged}
+                selectionColor={colors.primary}
+              />
             </View>
             
-            {/* Recording UI */}
-            {recording.isRecording && (
-              <View style={styles.recordingContainer}>
-                <View style={styles.recordingInfo}>
-                  <View style={styles.recordingIndicator} />
-                  <Text style={[styles.recordingText, { color: colors.text }]}>
-                    Recording: {formatTime(recording.recordingDuration)}
-                  </Text>
-                </View>
-                <View style={styles.recordingActions}>
-                  <TouchableOpacity style={styles.cancelButton} onPress={cancelRecording}>
-                    <Text style={styles.cancelText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity 
-                    style={[styles.sendButton, { backgroundColor: colors.primary }]} 
-                    onPress={sendAudioMessage}
-                  >
-                    <Text style={{ color: 'white', fontWeight: 'bold' }}>Send</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
+            {/* Send Button */}
+            <TouchableOpacity 
+              style={[
+                styles.sendButton,
+                {backgroundColor: currentTextInput.trim().length > 0 ? colors.primary : '#A0A0A8'}
+              ]} 
+              onPress={() => {
+                if (currentTextInput.trim().length > 0) {
+                  const messages = [{
+                    _id: Crypto.randomUUID(),
+                    text: currentTextInput,
+                    createdAt: new Date(),
+                    user: {
+                      _id: user?.id || '',
+                      name: user?.username || '',
+                      avatar: user?.profile_pic || '',
+                    },
+                  }];
+                  onSend(messages);
+                }
+              }}
+              disabled={currentTextInput.trim().length === 0}
+            >
+              <Ionicons name="send" size={18} color="white" />
+            </TouchableOpacity>
           </View>
+          
+          {/* Recording UI */}
+          {recording.isRecording && (
+            <View style={styles.recordingContainer}>
+              <View style={styles.recordingInfo}>
+                <View style={styles.recordingIndicator} />
+                <Text style={[styles.recordingText, { color: colors.text }]}>
+                  Recording: {formatTime(recording.recordingDuration)}
+                </Text>
+              </View>
+              <View style={styles.recordingActions}>
+                <TouchableOpacity style={styles.cancelButton} onPress={cancelRecording}>
+                  <Text style={styles.cancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.sendButton, { backgroundColor: colors.primary }]} 
+                  onPress={sendAudioMessage}
+                >
+                  <Text style={{ color: 'white', fontWeight: 'bold' }}>Send</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
         </View>
-      )}
+      </View>
     </View>
   );
 }
@@ -3323,6 +3768,150 @@ const styles = StyleSheet.create({
   linkPreviewUrl: {
     fontFamily: 'Inter',
     fontSize: 12,
+  },
+  loadingText: {
+    fontSize: 16,
+    fontWeight: '500',
+    marginTop: 10,
+  },
+  loadingDebug: {
+    fontSize: 12,
+    fontWeight: '400',
+    marginTop: 5,
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emptyText: {
+    fontSize: 24,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  emptySubtext: {
+    fontSize: 16,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  messagesContainer: {
+    flexGrow: 1,
+    paddingBottom: 0,
+    marginBottom: 0,
+  },
+  skeletonContainer: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+  },
+  skeletonMessage: {
+    flexDirection: 'row',
+    marginBottom: 16,
+    padding: 12,
+    borderRadius: 12,
+  },
+  skeletonAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#CCCCCC', 
+  },
+  skeletonContent: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  skeletonName: {
+    width: 100,
+    height: 14,
+    borderRadius: 7,
+    marginBottom: 8,
+  },
+  skeletonText: {
+    width: '80%',
+    height: 16,
+    borderRadius: 8,
+  },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: 'rgba(0,0,0,0.1)',
+    borderRadius: 20,
+    padding: 8,
+    zIndex: 10,
+  },
+  connectionIndicator: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    zIndex: 5,
+  },
+  connectionDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'white',
+  },
+  // Add debug-related styles
+  debugButton: {
+    marginRight: 12,
+    padding: 4,
+  },
+  debugModalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  debugModalContent: {
+    width: '90%',
+    maxHeight: '80%',
+    borderRadius: 12,
+    padding: 16,
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+  },
+  debugModalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 16,
+  },
+  debugModalScrollView: {
+    maxHeight: 300,
+  },
+  debugModalText: {
+    fontFamily: 'monospace',
+    marginBottom: 16,
+  },
+  debugButtonsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    marginTop: 16,
+  },
+  debugActionButton: {
+    margin: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  debugActionButtonText: {
+    color: 'white',
+  },
+  debugCloseButton: {
+    backgroundColor: '#666',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignSelf: 'center',
+    marginTop: 16,
+  },
+  debugCloseButtonText: {
+    color: 'white',
   },
 });
 

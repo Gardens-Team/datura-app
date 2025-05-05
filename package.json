@@ -46,7 +46,9 @@
     "expo-dev-client": "~5.0.20",
     "expo-device": "~7.0.3",
     "expo-font": "~13.0.4",
+    "expo-image": "~2.0.7",
     "expo-image-picker": "~16.0.6",
+    "expo-linear-gradient": "~14.0.2",
     "expo-linking": "~7.0.5",
     "expo-local-authentication": "^15.0.2",
     "expo-media-library": "~17.0.6",
@@ -68,6 +70,7 @@
     "react-native-gesture-handler": "~2.20.2",
     "react-native-gifted-chat": "^2.8.1",
     "react-native-keyboard-controller": "^1.17.1",
+    "react-native-mmkv": "^3.2.0",
     "react-native-parsed-text": "^0.0.22",
     "react-native-purchases": "^8.9.5",
     "react-native-purchases-ui": "^8.9.5",
@@ -83,8 +86,7 @@
     "tamagui": "^1.126.2",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
-    "zustand": "^5.0.3",
-    "expo-image": "~2.0.7"
+    "zustand": "^5.0.3"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

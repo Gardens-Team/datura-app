@@ -63,6 +63,7 @@ export default function GardenScreen() {
   const [channelLockStatus, setChannelLockStatus] = useState<Record<string, boolean>>({});
   const [updatingLockStatus, setUpdatingLockStatus] = useState(false);
   const headerHeight = useHeaderHeight();
+  const [groupKey, setGroupKey] = useState<string | null>(null);
   
   // Set the title in the header
   useEffect(() => {
@@ -426,6 +427,39 @@ export default function GardenScreen() {
       setLoadingChannel(false);
     }
   }, [id, newChannelName, newChannelGroup]);
+
+  // Fetch user data for message display
+  const fetchUserData = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, username, profile_pic')
+        .eq('id', userId)
+        .single();
+      
+      if (error) {
+        console.error('Error fetching user data:', error);
+        return { username: 'Unknown User', avatar: '' };
+      }
+      
+      return {
+        username: data.username,
+        avatar: data.profile_pic
+      };
+    } catch (error) {
+      console.error('Error in fetchUserData:', error);
+      return { username: 'Unknown User', avatar: '' };
+    }
+  };
+
+  // Get the garden key for logo decryption
+  useEffect(() => {
+    if (id && user?.id) {
+      getGroupKeyForGarden(id as string)
+        .then(key => setGroupKey(key))
+        .catch(err => console.error('Failed to get group key:', err));
+    }
+  }, [id, user?.id]);
 
   return (
     <GardenAuthProvider gardenId={id as string}>
