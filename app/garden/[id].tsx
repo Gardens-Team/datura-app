@@ -76,7 +76,54 @@ export default function GardenScreen() {
     fetchingGardenDetails: false
   });
   
-  // Set the title in the header
+  // Add a dedicated function to check user's role in the garden
+  const checkUserRole = useCallback(async () => {
+    if (!user || !garden) return;
+    
+    console.log('Checking admin access for user:', user.id, 'in garden:', garden.id);
+    
+    try {
+      // First check if user is the creator
+      let hasAdminAccess = garden.creatorId === user.id;
+      console.log('Is creator:', hasAdminAccess);
+      
+      if (!hasAdminAccess) {
+        // Get membership details
+        const { data: membership, error: memErr } = await supabase
+          .from('memberships')
+          .select('role')
+          .eq('garden_id', garden.id)
+          .eq('user_id', user.id)
+          .single();
+        
+        console.log('Membership query result:', membership, 'Error:', memErr);
+        
+        if (memErr) {
+          console.warn('Error fetching membership:', memErr.message);
+        } else if (membership) {
+          console.log('User role in garden:', membership.role);
+          hasAdminAccess = ['admin', 'moderator', 'creator'].includes(membership.role);
+          console.log('Has admin access based on role:', hasAdminAccess);
+        } else {
+          console.log('No membership found for this user in this garden');
+        }
+      }
+      
+      console.log('Setting isCreatorOrAdmin to:', hasAdminAccess);
+      setIsCreatorOrAdmin(hasAdminAccess);
+    } catch (error) {
+      console.error('Error checking user role:', error);
+    }
+  }, [user, garden]);
+
+  // Add effect to run role check when garden or user changes
+  useEffect(() => {
+    if (garden && user) {
+      checkUserRole();
+    }
+  }, [garden, user, checkUserRole]);
+  
+  // Set the title in the header and fetch garden details
   useEffect(() => {
     // Fetch garden details
     async function fetchGardenDetails() {
@@ -129,24 +176,6 @@ export default function GardenScreen() {
           }
         }
         
-        // Check if user is creator or admin
-        if (user && data) {
-          // creator, admin, or moderator roles can see the system feed
-          let hasAdminAccess = data.creator === user.id;
-          if (!hasAdminAccess) {
-            const { data: membership, error: memErr } = await supabase
-              .from('memberships')
-              .select('role')
-              .eq('garden_id', data.id)
-              .eq('user_id', user.id)
-              .single();
-            if (!memErr && membership && ['admin', 'moderator'].includes(membership.role)) {
-              hasAdminAccess = true;
-            }
-          }
-          setIsCreatorOrAdmin(hasAdminAccess);
-        }
-        
         // Set the navigation title
         if (navigation.setOptions) {
           navigation.setOptions({
@@ -162,6 +191,18 @@ export default function GardenScreen() {
     
     fetchGardenDetails();
   }, [id, navigation, user]);
+  
+  // Add a listener to check role again when navigating back to this screen
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      console.log('Garden screen focused, re-checking user role');
+      if (garden && user) {
+        checkUserRole();
+      }
+    });
+    
+    return unsubscribe;
+  }, [navigation, garden, user, checkUserRole]);
 
   // Fetch channels with useCallback to create a stable function
   const fetchChannels = useCallback(async () => {
@@ -200,7 +241,12 @@ export default function GardenScreen() {
   
   // Only show staff channels to creators and admins
   const channelGroups: Record<string, Channel[]> = { 'Everyone': everyoneChannels };
-  if (isCreatorOrAdmin) channelGroups['Staff'] = staffChannels;
+  if (isCreatorOrAdmin) {
+    channelGroups['Staff'] = staffChannels;
+    console.log('User has admin access, showing staff channels');
+  } else {
+    console.log('User does not have admin access, hiding staff channels');
+  }
 
   // Function to handle channel deletion with useCallback
   const handleDeleteChannel = useCallback(async () => {

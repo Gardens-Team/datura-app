@@ -654,18 +654,33 @@ export default function ChannelScreen() {
 
   // Function to load messages
   const loadMessages = useCallback(async () => {
-    if (!id) return;
+    if (!id) {
+      console.log('[ChannelScreen] No channel ID, cannot load messages');
+      return;
+    }
     
     // Exit if we don't have what we need for fetching messages
-    if (!groupKey || !daturaClient) return;
+    if (!groupKey) {
+      console.log('[ChannelScreen] No group key, cannot load messages');
+      return;
+    }
+    
+    if (!daturaClient) {
+      console.log('[ChannelScreen] No Datura client, cannot load messages');
+      return;
+    }
     
     // Set loading state
     setIsLoading(true);
     
+    // Clear existing messages first to avoid mixing
+    setMessages([]);
+    
     // Fetch messages
     try {
+      console.log(`[ChannelScreen] Fetching messages for channel ${id}`);
       const historyResult = await daturaClient.getMessageHistory(50);
-      console.log(`[ChannelScreen] Fetched ${historyResult?.length || 0} messages from server`);
+      console.log(`[ChannelScreen] Fetched ${historyResult?.length || 0} messages from server for channel ${id}`);
       
       if (historyResult?.length > 0) {
         // Process and decrypt messages
@@ -748,14 +763,16 @@ export default function ChannelScreen() {
           return msg;
         });
         
-        console.log(`[ChannelScreen] Processed ${enrichedMessages.length} messages successfully`);
+        console.log(`[ChannelScreen] Processed ${enrichedMessages.length} messages successfully for channel ${id}`);
         setMessages(enrichedMessages);
       } else {
-        console.log('[ChannelScreen] No messages returned from server');
+        console.log(`[ChannelScreen] No messages returned from server for channel ${id}`);
         setMessages([]);
       }
     } catch (e) {
       console.error('[ChannelScreen] Error fetching messages:', e);
+      // Set empty messages array on error
+      setMessages([]);
     } finally {
       setIsLoading(false);
       setInitialLoading(false);
@@ -763,12 +780,13 @@ export default function ChannelScreen() {
     }
   }, [id, groupKey, daturaClient, userProfiles, fetchUserProfiles]);
 
-  // Load messages when groupKey or daturaClient changes
+  // Load messages when groupKey or daturaClient changes - with force flag
   useEffect(() => {
-    if (groupKey && daturaClient) {
+    if (groupKey && daturaClient && id) {
+      console.log(`[ChannelScreen] Both client and key available for channel ${id}, loading messages`);
       loadMessages();
     }
-  }, [groupKey, daturaClient, loadMessages]);
+  }, [groupKey, daturaClient, id, loadMessages]);
 
   // Function to fetch the group key for a channel
   const getGroupKeyForChannel = useCallback(async (channelId: string, userId: string): Promise<string | null> => {
@@ -1298,32 +1316,25 @@ export default function ChannelScreen() {
 
   // Initialize Datura client when component mounts
   useEffect(() => {
-    let mounted = true;
+    // Reset ALL state when ID changes
+    setMessages([]);
+    setDaturaClient(null);
+    setGroupKey(null);
+    setUserProfiles({});
+    profileRequestCache.current = new Set<string>();
     setupCompleted.current = false;
     
-    // If we already have a client from context, use it
-    if (contextDaturaClient && id) {
-      setDaturaClient(contextDaturaClient);
-      
-      // Check if we already have the group key
-      const existingKey = getGroupKey(id as string);
-      if (existingKey) {
-        setGroupKey(existingKey);
-        setDebugInfo(`KEY: ${existingKey.substring(0, 5)}...`);
-        setupCompleted.current = true;
-        
-        // Skip initialize() since we already have everything
-        // Just mark as not loading and proceed
-        setIsLoading(false);
-        console.log('[ChannelScreen] Using existing client and key from Zustand store');
-        return;
-      }
-    }
+    console.log(`[ChannelScreen] MOUNTED with channel ID: ${id}`);
+    
+    let mounted = true;
     
     const initialize = async () => {
+      if (!mounted) return;
+      
       try {
+        setIsLoading(true);
         console.log(`[ChannelScreen] Initializing Datura client for channel ${id}`);
-        // Use the Datura context which now uses Zustand under the hood
+        
         const client = await initializeClient(id as string);
         
         if (!mounted) return;
@@ -1333,28 +1344,20 @@ export default function ChannelScreen() {
           console.log('[ChannelScreen] Datura client initialized successfully');
           
           try {
-            // Use the Datura context's getGroupKey function which uses Zustand
-            const key = getGroupKey(id as string);
+            // Always fetch a fresh key for this channel
+            console.log(`[ChannelScreen] Fetching fresh channel key from server`);
+            const fetchedKey = await getGroupKeyForChannel(id as string, user?.id || '');
             
             if (!mounted) return;
             
-            if (key) {
-              setGroupKey(key);
-              setDebugInfo(`KEY: ${key.substring(0, 5)}...`);
-              // Only mark setup as complete if both client and key are successful
+            if (fetchedKey) {
+              setGroupKey(fetchedKey);
+              storeGroupKey(id as string, fetchedKey); // Store in Zustand
+              setDebugInfo(`KEY: ${fetchedKey.substring(0, 5)}...`);
               setupCompleted.current = true;
             } else {
-              console.log(`[ChannelScreen] No key found in store, fetching from server`);
-              // Try fetching key from server if not in store
-              const fetchedKey = await getGroupKeyForChannel(id as string, user?.id || '');
-              if (fetchedKey && mounted) {
-                setGroupKey(fetchedKey);
-                storeGroupKey(id as string, fetchedKey); // Store in Zustand
-                setDebugInfo(`KEY: ${fetchedKey.substring(0, 5)}...`);
-                setupCompleted.current = true;
-              } else {
-                setDebugInfo('NO KEY');
-              }
+              console.log(`[ChannelScreen] No key found, cannot load messages`);
+              setDebugInfo('NO KEY');
             }
           } catch (e) {
             console.error('[ChannelScreen] Failed to get group key:', e);
@@ -1366,7 +1369,6 @@ export default function ChannelScreen() {
       } catch (error) {
         console.error('[ChannelScreen] Error initializing Datura client:', error);
       } finally {
-        // Set loading to false after initialization is complete (success or failure)
         if (mounted) {
           setIsLoading(false);
         }
@@ -1377,10 +1379,55 @@ export default function ChannelScreen() {
     
     // Cleanup function
     return () => {
+      console.log(`[ChannelScreen] UNMOUNTING channel ${id}`);
       mounted = false;
+      
+      // Disconnect client when unmounting
+      if (daturaClient) {
+        console.log('[ChannelScreen] Disconnecting client on cleanup');
+        try {
+          daturaClient.disconnect();
+        } catch (error) {
+          console.error('[ChannelScreen] Error disconnecting client:', error);
+        }
+      }
     };
-  }, [id, user?.id, initializeClient, getGroupKeyForChannel, contextDaturaClient, getGroupKey, storeGroupKey]);
+  }, [id, user?.id, initializeClient, getGroupKeyForChannel, storeGroupKey]);
+  
+  // Add a custom navigation handler to fully reset state when changing channels
+  useEffect(() => {
+    const unsubscribeBeforeRemove = navigation.addListener('beforeRemove', (e) => {
+      console.log('[ChannelScreen] Navigation beforeRemove event - cleaning up state');
+      
+      // Don't need to prevent default, just log for debugging
+      const { type, payload } = e.data.action;
+      console.log(`[ChannelScreen] Navigation action: ${type}`);
+    });
     
+    return unsubscribeBeforeRemove;
+  }, [navigation]);
+  
+  // Load messages when groupKey and daturaClient are both available
+  useEffect(() => {
+    if (groupKey && daturaClient && id && setupCompleted.current) {
+      console.log(`[ChannelScreen] Both client and key available for channel ${id}, loading messages`);
+      loadMessages();
+    }
+  }, [groupKey, daturaClient, id, loadMessages]);
+  
+  // Add a focused effect to reload messages when returning to the screen
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      console.log('[ChannelScreen] Screen focused, refreshing messages');
+      // Only reload if we have what we need
+      if (daturaClient && groupKey && id) {
+        loadMessages();
+      }
+    });
+    
+    return unsubscribe;
+  }, [navigation, loadMessages, daturaClient, groupKey, id]);
+  
   // Set up message subscription when client and key are available
   useEffect(() => {
     if (!daturaClient || !groupKey || !setupCompleted.current) {
