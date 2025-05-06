@@ -21,7 +21,6 @@ interface SecurityStepProps {
   passwordHash: string;
   publicKeyEncryption: string;
   publicKeySigning: string;
-  tokenStr?: string;
 }
 
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!
@@ -29,66 +28,8 @@ const supabaseKey = process.env.EXPO_PUBLIC_SUPABASE_KEY!
 
 const supabase = createClient(supabaseUrl, supabaseKey)
 
-// Function to check permissions and register for push notifications
-export async function registerForPushNotifications(userId?: string) {
-  if (!Device.isDevice) {
-    console.log('Must use physical device for Push Notifications');
-    return null;
-  }
 
-  // Set up a notification channel for Android
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('default', {
-      name: 'Default',
-      importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#2BAC76',
-    });
-
-    // Garden notifications channel
-    await Notifications.setNotificationChannelAsync('garden', {
-      name: 'Garden Notifications',
-      description: 'Notifications for garden memberships and activities',
-      importance: Notifications.AndroidImportance.HIGH,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#2BAC76',
-    });
-  }
-
-  // Check permissions
-  const { status: existingStatus } = await Notifications.getPermissionsAsync();
-  let finalStatus = existingStatus;
-  
-  if (existingStatus !== 'granted') {
-    const { status } = await Notifications.requestPermissionsAsync();
-    finalStatus = status;
-  }
-  
-  if (finalStatus !== 'granted') {
-    console.log('Failed to get push token for push notification!');
-    return null;
-  }
-
-  try {
-    // Get the Expo push token
-    const projectId = Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
-    if (!projectId) {
-      throw new Error('Project ID not found - configure in app.json/eas.json');
-    }
-    
-    const token = await Notifications.getExpoPushTokenAsync({
-      projectId,
-    });
-    
-    const tokenStr = token.data;
-    return tokenStr;
-  } catch (error) {
-    console.error('Error getting push token:', error);
-    return null;
-  }
-}
-
-export function SecurityStep({ onComplete, onBack, username, profilePic, passwordHash, tokenStr = '' }: SecurityStepProps) {
+export function SecurityStep({ onComplete, onBack, username, profilePic, passwordHash}: SecurityStepProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
@@ -124,7 +65,6 @@ export function SecurityStep({ onComplete, onBack, username, profilePic, passwor
         publicKeyEncryption: keyPairEncryption.publicKeyEncryption,
         publicKeySigning: keyPairSigning.publicKeySigning,
         passwordHash: passwordHash,
-        push_token: tokenStr,
       });
 
       // Save locally
@@ -158,7 +98,6 @@ export function SecurityStep({ onComplete, onBack, username, profilePic, passwor
     publicKeyEncryption: string; 
     publicKeySigning: string; 
     passwordHash: string;
-    push_token: string;
   }) {
     console.log("Supabase URL:", supabaseUrl);
     console.log("About to insert user to Supabase");
@@ -172,7 +111,6 @@ export function SecurityStep({ onComplete, onBack, username, profilePic, passwor
         signing_key: userData.publicKeySigning,
         passcode_hash: userData.passwordHash,
         created_at: new Date().toISOString(),
-        push_token: userData.push_token,
       });
 
     if (error) {

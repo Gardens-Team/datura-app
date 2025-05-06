@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { DaturaClient } from '@/services/datura-service';
+import { DaturaClient } from '@/services/messaging-service';
 import * as SecureStore from 'expo-secure-store';
 import { MMKV } from 'react-native-mmkv';
 
@@ -103,7 +103,7 @@ export const useDaturaStore = create<DaturaStore>()(
           }
           
           // Import dynamically to avoid circular dependencies
-          const { getDaturaClient } = await import('@/services/datura-service');
+          const { getDaturaClient } = await import('@/services/messaging-service');
           
           // Create a new client
           const client = await getDaturaClient(channelId);

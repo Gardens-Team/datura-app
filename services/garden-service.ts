@@ -532,7 +532,7 @@ export async function approveMembershipRequest(
     // Get member's public key from users table
     const { data: userData, error: userError } = await supabase
       .from('users')
-      .select('public_key, push_token')
+      .select('public_key')
       .eq('id', userId)
       .single();
 
@@ -605,140 +605,14 @@ export async function approveMembershipRequest(
  * Sends a notification that membership was approved
  */
 async function sendMembershipApprovalNotification(gardenId: string, userId: string): Promise<void> {
-  try {
-    console.log('Sending membership approval notification to user', userId);
-    
-    // Get user's device tokens for push notifications
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('username, push_token')
-      .eq('id', userId)
-      .single();
-
-    if (userError) throw userError;
-    
-    console.log('User push tokens:', user.push_token);
-
-    // Get garden info
-    const { data: garden, error: gardenError } = await supabase
-      .from('gardens')
-      .select('name, creator')
-      .eq('id', gardenId)
-      .single();
-
-    if (gardenError) throw gardenError;
-
-    // Create notification payload with deep link to garden
-    const notificationPayload = {
-      title: 'Membership Approved',
-      body: `Your request to join ${garden.name} has been approved. You now have access to the garden.`,
-      gardenId: gardenId,
-      gardenName: garden.name,
-      deepLink: `/garden/${gardenId}`
-    };
-    
-    console.log('Adding notification to database');
-
-    // Add notification to user's notifications table
-    const { error: notificationError } = await supabase
-      .from('notifications')
-      .insert({
-        user_id: userId,
-        type: 'membership_approved',
-        payload: JSON.stringify(notificationPayload),
-        created_at: new Date().toISOString(),
-      });
-
-    if (notificationError) throw notificationError;
-
-    // If user has push tokens, send push notification
-    if (user.push_token && user.push_token.length > 0) {
-      console.log('Sending push notification');
-      // Send the push notification using our service
-      await sendPushNotification(
-        user.push_token,
-        'Membership Approved',
-        `Your request to join ${garden.name} has been approved.`,
-        { 
-          type: 'membership_approved', 
-          gardenId,
-          deepLink: `/garden/${gardenId}`
-        }
-      );
-    } else {
-      console.log('No push tokens available, scheduling local notification');
-      // If no push tokens available, schedule a local notification they'll see when they open the app
-      await scheduleLocalNotification(
-        'Membership Approved',
-        `Your request to join ${garden.name} has been approved.`,
-        { 
-          type: 'membership_approved', 
-          gardenId,
-          deepLink: `/garden/${gardenId}` 
-        }
-      );
-    }
-    
-    console.log('Notification process completed');
-  } catch (error) {
-    console.error('Failed to send membership approval notification:', error);
-    throw error; // Re-throw to let the caller handle it
-  }
+ 
 }
 
 /**
  * Sends a notification that membership was denied
  */
 async function sendMembershipDenialNotification(gardenId: string, userId: string): Promise<void> {
-  try {
-    // Get user's device tokens for push notifications
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('username, push_token')
-      .eq('id', userId)
-      .single();
 
-    if (userError) throw userError;
-
-    // Get garden info
-    const { data: garden, error: gardenError } = await supabase
-      .from('gardens')
-      .select('name, creator')
-      .eq('id', gardenId)
-      .single();
-
-    if (gardenError) throw gardenError;
-
-    // Add notification to user's notifications table
-    const { error: notificationError } = await supabase
-      .from('notifications')
-      .insert({
-        user_id: userId,
-        type: 'membership_denied',
-        payload: JSON.stringify({
-          title: 'Membership Denied',
-          body: `Your request to join ${garden.name} was not approved.`,
-          gardenId: gardenId, 
-          gardenName: garden.name
-        }),
-        created_at: new Date().toISOString(),
-      });
-
-    if (notificationError) throw notificationError;
-
-    // If user has push tokens, send push notification
-    if (user.push_token && user.push_token.length > 0) {
-      await sendPushNotification(
-        user.push_token,
-        'Membership Denied',
-        `Your request to join ${garden.name} was not approved.`,
-        { type: 'membership_denied', gardenId }
-      );
-    }
-  } catch (error) {
-    console.error('Failed to send membership denial notification:', error);
-    // Don't throw to prevent breaking the denial flow
-  }
 }
 
 /**

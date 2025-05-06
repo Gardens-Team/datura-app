@@ -2,7 +2,7 @@ import { Stack } from 'expo-router';
 import { useColorScheme } from 'react-native';
 import { Colors } from '@/constants/Colors';
 import React, { createContext, useState, useContext, useEffect, useRef, useCallback } from 'react';
-import { DaturaClient } from '@/services/datura-service';
+import { DaturaClient } from '@/services/messaging-service';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useDaturaStore } from '@/stores/client.store';
 

@@ -13,7 +13,7 @@ import { useFocusEffect } from 'expo-router';
 import { getStoredPrivateKeyEncryption } from '@/utils/provisioning';
 
 // Interface for a Datura message
-interface UserProfile {
+export interface UserProfile {
 	id: string;
 	username: string;
 	display_name: string;

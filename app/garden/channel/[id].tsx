@@ -60,7 +60,7 @@ import {
   EnhancedMessage,
   testSupabaseConnection,
   testDirectMessageInsert,
-} from '@/services/datura-service';
+} from '@/services/messaging-service';
 import { Channel, Garden, isChannelLocked as checkChannelLocked } from '@/services/garden-service';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import * as Sharing from 'expo-sharing';
@@ -1346,7 +1346,7 @@ export default function ChannelScreen() {
             } else {
               console.log(`[ChannelScreen] No key found in store, fetching from server`);
               // Try fetching key from server if not in store
-              const fetchedKey = await getGroupKeyForChannel(id as string, user.id);
+              const fetchedKey = await getGroupKeyForChannel(id as string, user?.id || '');
               if (fetchedKey && mounted) {
                 setGroupKey(fetchedKey);
                 storeGroupKey(id as string, fetchedKey); // Store in Zustand

@@ -32,7 +32,7 @@ import {
   decryptMessage, 
   createMessageFromPayload,
   uploadMediaAsBase64 
-} from '@/services/datura-service';
+} from '@/services/messaging-service';
 import * as SecureStore from 'expo-secure-store';
 
 // Interface for our DM chat message
