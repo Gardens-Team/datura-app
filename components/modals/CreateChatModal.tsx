@@ -23,16 +23,14 @@ import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import * as ImagePicker from 'expo-image-picker';
+const daturaLogo = require('../../assets/images/icon.png');
 
-// Import the logo
-const daturaLogo = require('@/assets/images/icon.png');
-
-interface AddFriendsModalProps {
+interface CreateChatModalProps {
   visible: boolean;
   onClose: () => void;
 }
 
-export function AddFriendsModal({ visible, onClose }: AddFriendsModalProps) {
+export function CreateChatModal({ visible, onClose }: CreateChatModalProps) {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
   const [activeTab, setActiveTab] = useState<'myQR' | 'scanQR'>('myQR');
@@ -43,7 +41,7 @@ export function AddFriendsModal({ visible, onClose }: AddFriendsModalProps) {
 
   const generateUserQRValue = () => {
     // In a real app, this would include the user's ID or a special token
-    return `datura://add-friend/${user?.id || Math.random().toString(36).substring(2, 15)}`;
+    return `datura://connect/${user?.id || Math.random().toString(36).substring(2, 15)}`;
   };
 
   // Function to capture QR code as image
@@ -137,9 +135,12 @@ export function AddFriendsModal({ visible, onClose }: AddFriendsModalProps) {
     await Clipboard.setStringAsync(url);
     Alert.alert('Link Copied', 'Friend invite link copied to clipboard.');
   };
+  const isRemoteImage = (uri: string | undefined): boolean =>
+    typeof uri === 'string' && (uri.startsWith('http://') || uri.startsWith('https://'));
 
   // Branded QR Card Component
   const BrandedQRCard = () => (
+    
     <View style={[styles.qrCard, { backgroundColor: colorScheme === 'dark' ? '#222' : 'white' }]}>
       <View style={styles.qrCardHeader}>
         <Text style={[styles.qrCardTitle, { color: colors.text }]}>Friend Invitation</Text>
@@ -149,7 +150,7 @@ export function AddFriendsModal({ visible, onClose }: AddFriendsModalProps) {
         <QRCode 
           value={generateUserQRValue()} 
           size={200} 
-          logo={user?.profile_pic || daturaLogo}
+          logo={isRemoteImage(user?.profile_pic) ? undefined : daturaLogo}
           logoSize={60}
           logoBackgroundColor="white"
           logoBorderRadius={10}
@@ -194,7 +195,7 @@ export function AddFriendsModal({ visible, onClose }: AddFriendsModalProps) {
           <TouchableOpacity onPress={onClose} style={styles.backButton}>
             <Ionicons name="arrow-back" size={24} color={colors.text} />
           </TouchableOpacity>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>Add Friends</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>Start Chat</Text>
           <View style={styles.headerRight} />
         </View>
 

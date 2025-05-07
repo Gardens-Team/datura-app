@@ -6,24 +6,39 @@ import { useColorScheme } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, usePathname } from 'expo-router';
 
-const tabs = [
+type TabPath = '/(tabs)/home' | '/(tabs)/notifications' | '/(tabs)/discover' | '/(tabs)/profile';
+
+interface TabItem {
+  name: string;
+  label: string;
+  icon: string;
+  path: TabPath;
+}
+
+const tabs: TabItem[] = [
   {
     name: 'home',
     label: 'Home',
     icon: 'home',
-    path: '/(tabs)/home' as const,
+    path: '/(tabs)/home',
   },
   {
     name: 'notifications',
     label: 'Notifications',
-    icon: 'notifications-outline',
-    path: '/(tabs)/notifications' as const,
+    icon: 'notifications',
+    path: '/(tabs)/notifications',
+  },
+  {
+    name: 'discover',
+    label: 'Discover',
+    icon: 'compass',
+    path: '/(tabs)/discover',
   },
   {
     name: 'profile',
     label: 'Profile',
     icon: 'person',
-    path: '/profile' as const,
+    path: '/(tabs)/profile',
   },
 ];
 
@@ -67,13 +82,7 @@ export function TabBar() {
           <TouchableOpacity
             key={tab.name}
             style={styles.tab}
-            onPress={() => {
-              if (tab.path === '/(tabs)/home' || '/notifications' || tab.path === '/profile') {
-                router.push(tab.path);
-              } else {
-                console.error(`Invalid path: ${tab.path}`);
-              }
-            }}
+            onPress={() => router.push(tab.path)}
           >
             <Ionicons
               name={tab.icon as any}

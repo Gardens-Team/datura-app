@@ -9,12 +9,12 @@ import {
 import { useColorScheme } from 'react-native';
 import { Colors } from '@/constants/Colors';
 import { Ionicons } from '@expo/vector-icons';
-import { AddFriendsModal } from '@/components/modals/AddFriendsModal';
+import { CreateChatModal } from '@/components/modals/CreateChatModal';
 
-export function Friends() {
+export function Chat() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
-  const [showAddFriendsModal, setShowAddFriendsModal] = useState(false);
+  const [showCreateChatModal, setShowCreateChatModal] = useState(false);
 
   return (
     <View 
@@ -37,18 +37,18 @@ export function Friends() {
       </View>
       <TouchableOpacity 
         style={[styles.addFriendsButton, { backgroundColor: colors.surface }]}
-        onPress={() => setShowAddFriendsModal(true)}
+        onPress={() => setShowCreateChatModal(true)}
       >
-        <Ionicons name="person-add" size={20} color="#000000" style={styles.iconStyle} />
+        <Ionicons name="chatbubble-ellipses-outline" size={20} color="#000000" style={styles.iconStyle} />
         <Text style={styles.addFriendsText}>
-          Add Friends
+         Create Secure Chat
         </Text>
       </TouchableOpacity>
 
       {/* Add Friends Modal */}
-      <AddFriendsModal
-        visible={showAddFriendsModal}
-        onClose={() => setShowAddFriendsModal(false)}
+      <CreateChatModal
+        visible={showCreateChatModal}
+        onClose={() => setShowCreateChatModal(false)}
       />
     </View>
   );

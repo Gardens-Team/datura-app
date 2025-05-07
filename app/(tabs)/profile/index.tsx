@@ -17,14 +17,13 @@ import { Colors } from '@/constants/Colors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
-import { useUserCreatorGardens } from '@/hooks/useUserGardens';
 import { useRouter } from 'expo-router';
 import { Garden } from '@/services/garden-service';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '@/services/supabase-singleton';
 import * as FileSystem from 'expo-file-system';
 import { saveUserProfile } from '@/services/database-service';
-import ProfileEditModal from '../components/ProfileEditModal';
+import ProfileEditModal from '@/components/modals/ProfileEditModal';
 
 // Define a more complete User Profile interface based on database schema
 interface FullUserProfile {
@@ -72,24 +71,8 @@ export default function ProfileScreen() {
   // Cast the user data to the more complete type
   const fullUser = user as FullUserProfile | null;
 
-  // Fetch creator gardens using the new hook
-  const { 
-    gardens,
-    decryptedLogos,
-    loading: gardensLoading,
-    error: gardensError,
-  } = useUserCreatorGardens(fullUser?.id);
-
-  // Shuffle and limit gardens once when data is loaded
-  const displayedGardens = useMemo(() => {
-    if (gardens && gardens.length > 0) {
-      return shuffleArray(gardens).slice(0, 8); // Shuffle and take max 8
-    }
-    return [];
-  }, [gardens]);
-
   // Combined loading state
-  const isLoading = userLoading || gardensLoading;
+  const isLoading = userLoading;
 
   // Random color for banner - would be user-selected in a real app
   const bannerColor = '#3b82f6';
@@ -328,27 +311,6 @@ export default function ProfileScreen() {
     year: 'numeric', month: 'short', day: 'numeric'
   }) : 'N/A';
 
-  // Helper to render each garden item in the grid
-  const renderGardenItem = ({ item }: { item: Garden }) => {
-    const logoUri = item.id ? decryptedLogos[item.id] : null;
-    const initials = item.name ? item.name.charAt(0).toUpperCase() : '?';
-
-    return (
-      <TouchableOpacity 
-        style={styles.myGardensItem}
-        onPress={() => item.id && router.push(`/garden/${item.id}`)} // Navigate to garden page
-      >
-        {logoUri ? (
-          <Image source={{ uri: logoUri }} style={styles.myGardensLogo} />
-        ) : (
-          <View style={[styles.myGardensLogo, styles.myGardensInitials, { backgroundColor: colors.primary + '30' }]}>
-            <Text style={[styles.initialsText, { color: colors.primary }]}>{initials}</Text>
-          </View>
-        )}
-      </TouchableOpacity>
-    );
-  };
-
   return (
     <ScrollView 
       style={[styles.container, { backgroundColor: colors.background }]}
@@ -411,29 +373,6 @@ export default function ProfileScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* My Gardens Section */}
-      <View style={[styles.myGardensContainer, { backgroundColor: isDark ? '#2b2d31' : '#f2f3f5', borderColor: colors.border }]}>
-        <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 12 }]}>My Gardens</Text> 
-        {gardensError && (
-          <Text style={{ color: colors.error }}>Error loading gardens.</Text>
-        )}
-        {!gardensError && displayedGardens.length > 0 && (
-          <FlatList
-            data={displayedGardens}
-            renderItem={renderGardenItem}
-            keyExtractor={(item) => item.id || Math.random().toString()}
-            numColumns={4}
-            columnWrapperStyle={styles.myGardensGrid}
-            scrollEnabled={false}
-          />
-        )}
-        {!gardensError && displayedGardens.length === 0 && !gardensLoading && (
-          <Text style={{ color: colors.secondaryText, textAlign: 'center' }}> 
-You haven't created any gardens yet.
-          </Text>
-        )}
-      </View>
-
       {/* About Me */}
       <View style={styles.sectionContainer}>
         <Text style={[styles.sectionTitle, { color: colors.text }]}>About Me</Text>
@@ -455,34 +394,6 @@ You haven't created any gardens yet.
         <View style={styles.memberSinceContainer}>
           <Ionicons name="leaf-outline" size={18} color={colors.secondaryText} />
           <Text style={[styles.memberSinceText, { color: colors.text }]}>{memberSinceDate}</Text>
-        </View>
-      </View>
-
-      {/* Friends Section */}
-      <View style={styles.sectionContainer}>
-        <View style={styles.sectionTitleRow}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Your Friends</Text>
-          <TouchableOpacity onPress={handleOpenEditModal}>
-            <Ionicons name="chevron-forward" size={18} color={colors.secondaryText} />
-          </TouchableOpacity>
-        </View>
-        
-        <View style={styles.friendsContainer}>
-          {friendsList.length > 0 ? (
-            friendsList.map((friend, index) => (
-              <View 
-                key={index} 
-                style={[
-                  styles.friendAvatar, 
-                  { backgroundColor: `hsl(${index * 50}, 70%, 60%)` }
-                ]} 
-              >
-                <Text style={styles.friendInitial}>{friend.charAt(0).toUpperCase()}</Text>
-              </View>
-            ))
-          ) : (
-            <Text style={{ color: colors.secondaryText }}>No friends added yet.</Text>
-          )}
         </View>
       </View>
 

@@ -17,13 +17,7 @@ interface AuthContextType {
   checkAuthStatus: () => Promise<boolean>;
 }
 
-interface GardenAuthContextType {
-  authenticate: () => Promise<boolean>;
-  authenticateWithPasscode: (passcode: string) => Promise<boolean>;
-}
-
 const AuthContext = createContext<AuthContextType | null>(null);
-const GardenAuthContext = createContext<GardenAuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -159,14 +153,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signOut, 
         checkAuthStatus
       }}
-    >
-      <GardenAuthContext.Provider 
-        value={{ authenticate, authenticateWithPasscode }}
       >
+
         <TouchableWithoutFeedback onPressIn={() => setLastActivity(Date.now())}>
           <View style={{ flex: 1 }}>{children}</View>
         </TouchableWithoutFeedback>
-      </GardenAuthContext.Provider>
     </AuthContext.Provider>
   );
 }
@@ -178,11 +169,3 @@ export function useAuth() {
   }
   return context;
 }
-
-export function useGardenAuth() {
-  const context = useContext(GardenAuthContext);
-  if (!context) {
-    throw new Error('useGardenAuth must be used within an AuthProvider');
-  }
-  return context;
-} 
