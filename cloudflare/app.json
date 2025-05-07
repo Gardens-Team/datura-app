@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "android": {
+      "package": "com.comradecrashout.cloudflare"
+    },
+    "ios": {
+      "bundleIdentifier": "com.comradecrashout.cloudflare"
+    }
+  }
+}

@@ -24,10 +24,10 @@ export function ProfilePicStep({ onNext, onBack }: ProfilePicStepProps) {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: 'images',
+      mediaTypes: ['images', 'videos', 'livePhotos'],
       allowsEditing: true,
       aspect: [1, 1],
-      quality: 0.5,
+      quality: 1,
       base64: true
     });
 

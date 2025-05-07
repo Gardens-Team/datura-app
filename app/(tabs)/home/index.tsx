@@ -6,26 +6,30 @@ import {
   TouchableOpacity,
   Image,
   ScrollView,
+  Platform,
 } from 'react-native';
 import { useColorScheme } from 'react-native';
 import { Colors } from '@/constants/Colors';
-import { Friends } from '@/components/Friends';
+import { Chat } from '@/components/Chat';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function HomeScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
+  const insets = useSafeAreaInsets();
 
   return (
-    <View 
+    <SafeAreaView 
       style={[
         styles.container, 
         { backgroundColor: colors.background }
       ]}
+      edges={['right', 'left']}
     >
       <View style={styles.content}>
-        {/* Header */}
-        <Friends />
+        {/* Chat Component with Header */}
+        <Chat />
         
         {/* Main Scrollable Content */}
         <ScrollView 
@@ -58,7 +62,7 @@ export default function HomeScreen() {
           </View>
         </ScrollView>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -68,7 +72,6 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    marginLeft: 72, // Width of the dock
   },
   scrollView: {
     flex: 1,
@@ -82,7 +85,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 24,
-    paddingTop: 70, // Balance the vertical space
+    paddingTop: 20,
     paddingBottom: 180, // Account for tab bar
     minHeight: 400,
   },

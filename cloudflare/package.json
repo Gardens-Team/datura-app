@@ -1,0 +1,23 @@
+{
+  "name": "cloudflare",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "cf-typegen": "wrangler types",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250503.0",
+    "typescript": "^5.5.2",
+    "wrangler": "^4.14.1"
+  },
+  "dependencies": {
+    "expo": "~52.0.46",
+    "react": "18.3.1",
+    "react-native": "0.76.9"
+  }
+}

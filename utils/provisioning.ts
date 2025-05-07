@@ -132,7 +132,6 @@ export async function generateAESSymmetricKey(): Promise<string> {
   }
 }
 
-
 export function decryptGroupKeyFromBinary(
   decodedPayload: Uint8Array, 
   privateKeyBase64: string
@@ -147,4 +146,9 @@ export function decryptGroupKeyFromBinary(
   
   if (!plain) throw new Error('Decryption failed');
   return encode(plain);
+}
+
+export async function generateRotationKeyMaterial(): Promise<string> {
+  const newKey = await generateAESSymmetricKey();
+  return newKey;
 }

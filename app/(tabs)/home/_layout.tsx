@@ -2,7 +2,7 @@ import { Stack } from 'expo-router';
 import { useColorScheme } from 'react-native';
 import { Colors } from '@/constants/Colors';
 
-export default function DiscoverLayout() {
+export default function HomeLayout() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
 
@@ -11,6 +11,7 @@ export default function DiscoverLayout() {
       <Stack.Screen
         name="index"
         options={{
+          headerShown: false,
           headerStyle: {
             backgroundColor: colors.background,
           },

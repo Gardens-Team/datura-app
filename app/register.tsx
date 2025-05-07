@@ -39,7 +39,7 @@ export default function RegisterScreen() {
 
   const steps = [
     {
-      title: 'Choose Username',
+      title: 'Username',
       component: <UsernameStep 
         onNext={(username) => {
           setUserData(prev => ({ ...prev, username }));
@@ -48,7 +48,7 @@ export default function RegisterScreen() {
       />
     },
     {
-      title: 'Profile Picture',
+      title: 'Profile Pic',
       component: <ProfilePicStep 
         onNext={(profilePic) => {
           setUserData(prev => ({ ...prev, profilePic }));
@@ -58,7 +58,7 @@ export default function RegisterScreen() {
       />
     },
     {
-      title: 'Security Setup',
+      title: 'Security',
       component: <SecurityStep 
         username={userData.username}
         profilePic={userData.profilePic || ''}
@@ -70,7 +70,7 @@ export default function RegisterScreen() {
       />
     },
     {
-      title: 'Set Passcode',
+      title: 'Passcode',
       component: <PasscodeStep 
         onComplete={(passwordHash) => {
           setUserData(prev => ({ ...prev, passwordHash }));
